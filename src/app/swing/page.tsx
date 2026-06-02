@@ -19,9 +19,11 @@ export default function SwingPage() {
   const lastTsRef = useRef(0);
   const streamRef = useRef<MediaStream | null>(null);
   const recordingRef = useRef(false);
+  const landmarkerRef = useRef<Awaited<ReturnType<typeof getPoseLandmarker>> | null>(null);
 
   const [stage, setStage] = useState<Stage>("idle");
   const [countdown, setCountdown] = useState(0);
+  const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [pros, setPros] = useState<Pro[]>([]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [pro, setPro] = useState<Pro | null>(null);
@@ -49,56 +51,106 @@ export default function SwingPage() {
     streamRef.current = null;
   }
 
-  async function loop() {
+  // Load the MediaPipe model once. Never blocks the camera; if it fails the
+  // camera still works and we surface a retry-able message.
+  async function ensureModel() {
+    if (landmarkerRef.current) return landmarkerRef.current;
+    setModelState("loading");
+    try {
+      const lm = await getPoseLandmarker();
+      landmarkerRef.current = lm;
+      setModelState("ready");
+      setErr("");
+      return lm;
+    } catch (e) {
+      console.error("pose model load failed", e);
+      setModelState("error");
+      setErr("AI解析エンジンの読み込みに失敗しました。通信環境を確認して再試行してください。");
+      return null;
+    }
+  }
+
+  function startLoop() {
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(loop);
+  }
+
+  function loop() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas) return;
-    if (video.readyState >= 2 && video.videoWidth) {
+    if (video && canvas && video.readyState >= 2 && video.videoWidth) {
       if (canvas.width !== video.videoWidth) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
       }
-      const ctx = canvas.getContext("2d")!;
-      try {
-        const lm = await getPoseLandmarker();
-        const ts = Math.max(performance.now(), lastTsRef.current + 1);
-        lastTsRef.current = ts;
-        const res = lm.detectForVideo(video, ts);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        const pose = res.landmarks?.[0];
-        if (pose) {
-          drawSkeleton(ctx, pose as Frame, canvas.width, canvas.height);
-          if (recordingRef.current) framesRef.current.push(pose as Frame);
+      const ctx = canvas.getContext("2d");
+      const lm = landmarkerRef.current;
+      if (ctx && lm) {
+        try {
+          const ts = Math.max(performance.now(), lastTsRef.current + 1);
+          lastTsRef.current = ts;
+          const res = lm.detectForVideo(video, ts);
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          const pose = res.landmarks?.[0];
+          if (pose) {
+            drawSkeleton(ctx, pose as Frame, canvas.width, canvas.height);
+            if (recordingRef.current) framesRef.current.push(pose as Frame);
+          }
+        } catch {
+          /* transient detect errors are fine */
         }
-      } catch {
-        /* transient detect errors are fine */
       }
     }
     rafRef.current = requestAnimationFrame(loop);
   }
 
+  function cameraErrorMessage(e: unknown): string {
+    const name = (e as { name?: string })?.name;
+    if (name === "NotAllowedError" || name === "SecurityError")
+      return "カメラの使用が許可されませんでした。ブラウザのアドレスバーからカメラを「許可」に変更してください。";
+    if (name === "NotFoundError" || name === "OverconstrainedError")
+      return "利用できるカメラが見つかりませんでした。動画アップロードをご利用ください。";
+    if (name === "NotReadableError")
+      return "カメラが他のアプリで使用中の可能性があります。他のアプリを閉じて再試行してください。";
+    return "カメラを起動できませんでした。権限を確認するか、動画アップロードをお試しください。";
+  }
+
   async function startCamera() {
     setErr("");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setErr("このブラウザ/接続ではカメラを利用できません（HTTPS環境が必要です）。動画アップロードをご利用ください。");
+      return;
+    }
     setStage("loading");
+    let stream: MediaStream | null = null;
     try {
-      await getPoseLandmarker();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 720 } },
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 720 } },
         audio: false,
       });
-      streamRef.current = stream;
-      const video = videoRef.current!;
-      video.srcObject = stream;
-      video.muted = true;
-      await video.play();
-      setStage("ready");
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = requestAnimationFrame(loop);
-    } catch (e) {
-      setErr("カメラを起動できませんでした。権限を確認するか、動画アップロードをお試しください。");
-      setStage("idle");
-      console.error(e);
+    } catch {
+      // Fallback: laptops/desktops often have no "environment" camera.
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      } catch (e2) {
+        setErr(cameraErrorMessage(e2));
+        setStage("idle");
+        return;
+      }
     }
+    streamRef.current = stream;
+    const video = videoRef.current!;
+    video.srcObject = stream;
+    video.muted = true;
+    video.playsInline = true;
+    try {
+      await video.play();
+    } catch {
+      /* play() can reject under autoplay policy; loop guards on readyState */
+    }
+    setStage("ready");
+    startLoop();
+    void ensureModel(); // load AI in the background — camera is already live
   }
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -107,24 +159,26 @@ export default function SwingPage() {
     setErr("");
     setStage("loading");
     try {
-      await getPoseLandmarker();
       stopAll();
       const video = videoRef.current!;
       video.srcObject = null;
       video.src = URL.createObjectURL(file);
       video.muted = true;
       video.playsInline = true;
-      await video.play();
-      setStage("ready");
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = requestAnimationFrame(loop);
-      // auto-record the whole clip
+      // For a file we can wait for the model so the whole clip is analyzed.
+      const lm = await ensureModel();
+      if (!lm) {
+        setStage("idle");
+        return;
+      }
+      await video.play().catch(() => {});
+      startLoop();
       framesRef.current = [];
       recordingRef.current = true;
       setStage("recording");
       video.onended = () => finishAnalysis();
     } catch (e) {
-      setErr("動画を読み込めませんでした。");
+      setErr("動画を読み込めませんでした。別の動画ファイルでお試しください。");
       setStage("idle");
       console.error(e);
     }
@@ -247,7 +301,16 @@ export default function SwingPage() {
               )}
               {stage === "loading" && (
                 <div className="absolute inset-0 grid place-items-center">
-                  <Spinner label="AIモデルを準備中…" />
+                  <Spinner label="カメラを起動中…" />
+                </div>
+              )}
+              {modelState === "loading" && stage !== "loading" && stage !== "idle" && (
+                <div
+                  className="absolute bottom-2 left-2 px-2.5 py-1 rounded-full text-[11px] flex items-center gap-1.5"
+                  style={{ background: "rgba(0,0,0,0.65)", color: "#fff" }}
+                >
+                  <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  AI解析エンジン準備中…
                 </div>
               )}
               {stage === "prep" && (
@@ -292,8 +355,16 @@ export default function SwingPage() {
                 </label>
               </>
             ) : stage === "ready" ? (
-              <button onClick={startRecording} className="btn btn-primary py-3 col-span-2">
-                ⏺ スイングを解析（3秒後に5秒間撮影）
+              <button
+                onClick={() => (modelState === "error" ? ensureModel() : startRecording())}
+                disabled={modelState === "loading"}
+                className="btn btn-primary py-3 col-span-2 disabled:opacity-50"
+              >
+                {modelState === "ready"
+                  ? "⏺ スイングを解析（3秒後に5秒間撮影）"
+                  : modelState === "error"
+                    ? "↻ AIエンジンを再読み込み"
+                    : "AI解析エンジンを準備中…"}
               </button>
             ) : (
               <div className="col-span-2 text-center text-sm py-3" style={{ color: "var(--muted)" }}>

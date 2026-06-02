@@ -75,20 +75,31 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
       setCamOn(false);
       return;
     }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      alert("このブラウザ/接続ではカメラを利用できません（HTTPS環境が必要です）。");
+      return;
+    }
+    let s: MediaStream | null = null;
     try {
-      const s = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
+      s = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
         audio: false,
       });
-      streamRef.current = s;
-      if (videoRef.current) {
-        videoRef.current.srcObject = s;
-        await videoRef.current.play();
-      }
-      setCamOn(true);
     } catch {
-      alert("カメラを起動できませんでした");
+      try {
+        s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      } catch {
+        alert("カメラを起動できませんでした。権限を確認してください。");
+        return;
+      }
     }
+    streamRef.current = s;
+    if (videoRef.current) {
+      videoRef.current.srcObject = s;
+      videoRef.current.playsInline = true;
+      await videoRef.current.play().catch(() => {});
+    }
+    setCamOn(true);
   }
 
   function rec(kind: "holed" | "in1" | "in2" | "miss") {

@@ -49,7 +49,9 @@ export async function getPoseLandmarker(): Promise<PoseLandmarker> {
   if (!landmarkerPromise) {
     landmarkerPromise = (async () => {
       const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm",
+        // Keep this version in sync with the installed @mediapipe/tasks-vision
+        // in package.json — a JS/WASM version skew causes runtime failures.
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm",
       );
       const opts = (delegate: "GPU" | "CPU") => ({
         baseOptions: {
