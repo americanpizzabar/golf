@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0b1220;
+  --bg-soft: #111c2e;
+  --card: #16233a;
+  --card-2: #1b2c47;
+  --line: #243651;
+  --fg: #eaf2ff;
+  --muted: #93a4bf;
+  --green: #22c55e;
+  --green-2: #16a34a;
+  --cyan: #22d3ee;
+  --amber: #f59e0b;
+  --red: #ef4444;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-card: var(--card);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-green: var(--green);
+  --color-line: var(--line);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 50% -10%, #16324a 0%, transparent 55%),
+    var(--bg);
+  color: var(--fg);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Hiragino Kaku Gothic ProN",
+    "Noto Sans JP", Meiryo, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* App container: mobile-first, centered phone frame on desktop */
+.app-shell {
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100dvh;
+  position: relative;
+  padding-bottom: 84px;
+}
+
+.card {
+  background: linear-gradient(180deg, var(--card), var(--card-2));
+  border: 1px solid var(--line);
+  border-radius: 18px;
+}
+
+.btn {
+  border-radius: 14px;
+  font-weight: 600;
+  transition:
+    transform 0.05s ease,
+    filter 0.15s ease;
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn-primary {
+  background: linear-gradient(180deg, var(--green), var(--green-2));
+  color: #03260f;
+}
+.btn-ghost {
+  background: var(--card);
+  border: 1px solid var(--line);
+  color: var(--fg);
+}
+
+input,
+select,
+textarea {
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--fg);
+  outline: none;
+}
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--green);
+}
+
+.tabbar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 0;
+  width: 100%;
+  max-width: 480px;
+  background: rgba(11, 18, 32, 0.92);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--line);
+  z-index: 40;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
