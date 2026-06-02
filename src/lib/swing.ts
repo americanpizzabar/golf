@@ -107,7 +107,26 @@ export function analyzeSwing(
 ): SwingResult {
   const fm = frames.map((f) => frameMetrics(f, opts.leftHanded));
   const good = fm.filter((m) => m.ok);
-  const valid = good.length >= 6 && frames.length >= 8;
+  const valid = good.length >= 5 && frames.length >= 6;
+
+  // Guard: if the skeleton was barely (or never) detected, bail out with a
+  // safe, invalid result instead of indexing into an empty array (which would
+  // throw and leave the UI stuck on "解析中").
+  if (fm.length < 4) {
+    const zero: PhaseAngles = { shoulderTurn: 0, hipTurn: 0, spineTilt: 0, swingPlane: 0 };
+    return {
+      angles: { address: zero, top: zero, impact: zero, finish: zero },
+      shoulderTurn: 0,
+      hipTurn: 0,
+      spineTilt: 0,
+      swingPlane: 0,
+      tempoRatio: 0,
+      swayCm: 0,
+      leadArmImpact: 0,
+      phaseIdx: { address: 0, top: 0, impact: 0, finish: 0 },
+      valid: false,
+    };
+  }
 
   // Address = first stable frames; reference widths from address window.
   const addrWin = fm.slice(0, Math.max(1, Math.floor(fm.length * 0.12)));

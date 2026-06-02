@@ -24,6 +24,7 @@ export default function SwingPage() {
   const [stage, setStage] = useState<Stage>("idle");
   const [countdown, setCountdown] = useState(0);
   const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [facing, setFacing] = useState<"environment" | "user">("environment");
   const [pros, setPros] = useState<Pro[]>([]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [pro, setPro] = useState<Pro | null>(null);
@@ -115,21 +116,25 @@ export default function SwingPage() {
     return "カメラを起動できませんでした。権限を確認するか、動画アップロードをお試しください。";
   }
 
-  async function startCamera() {
+  async function startCamera(facingOverride?: "environment" | "user") {
     setErr("");
     if (!navigator.mediaDevices?.getUserMedia) {
       setErr("このブラウザ/接続ではカメラを利用できません（HTTPS環境が必要です）。動画アップロードをご利用ください。");
       return;
     }
+    const want = facingOverride ?? facing;
+    // Stop any existing stream first (needed when switching cameras).
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
     setStage("loading");
     let stream: MediaStream | null = null;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 720 } },
+        video: { facingMode: { ideal: want }, width: { ideal: 720 } },
         audio: false,
       });
     } catch {
-      // Fallback: laptops/desktops often have no "environment" camera.
+      // Fallback: some devices have no camera matching the requested facing.
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       } catch (e2) {
@@ -151,6 +156,12 @@ export default function SwingPage() {
     setStage("ready");
     startLoop();
     void ensureModel(); // load AI in the background — camera is already live
+  }
+
+  function switchCamera() {
+    const next = facing === "environment" ? "user" : "environment";
+    setFacing(next);
+    startCamera(next);
   }
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -219,30 +230,41 @@ export default function SwingPage() {
     recordingRef.current = false;
     setStage("analyzing");
     const frames = framesRef.current;
-    const leftHanded = profile?.dominant_hand === "left";
-    const r = analyzeSwing(frames, {
-      heightCm: profile?.height_cm ?? undefined,
-      leftHanded,
-    });
-    if (!r.valid) {
-      setErr("骨格をうまく検出できませんでした。全身が映る位置で、明るい場所で再撮影してください。");
+    try {
+      const detected = frames.length;
+      const leftHanded = profile?.dominant_hand === "left";
+      const r = analyzeSwing(frames, {
+        heightCm: profile?.height_cm ?? undefined,
+        leftHanded,
+      });
+      if (!r.valid) {
+        setErr(
+          detected === 0
+            ? "骨格を検出できませんでした。全身（頭から足まで）がフレームに入るようカメラから2〜3m離れ、明るい場所で再撮影してください。"
+            : "スイングをうまく解析できませんでした。全身が映る位置で、もう一度ゆっくりスイングしてみてください。",
+        );
+        setStage("ready");
+        return;
+      }
+      const f = detectFaults(r, pro);
+      const bodySync = matchPro(pros, profile ?? {})?.sync ?? 70;
+      const s = syncRate(bodySync, r, pro);
+      setResult(r);
+      setFaults(f);
+      setSync(s);
+      setPhaseFrames({
+        address: frames[r.phaseIdx.address] ?? null,
+        top: frames[r.phaseIdx.top] ?? null,
+        impact: frames[r.phaseIdx.impact] ?? null,
+        finish: frames[r.phaseIdx.finish] ?? null,
+      });
+      setSaved(false);
+      setStage("done");
+    } catch (e) {
+      console.error("swing analysis failed", e);
+      setErr("解析中に問題が発生しました。もう一度お試しください。");
       setStage("ready");
-      return;
     }
-    const f = detectFaults(r, pro);
-    const bodySync = matchPro(pros, profile ?? {})?.sync ?? 70;
-    const s = syncRate(bodySync, r, pro);
-    setResult(r);
-    setFaults(f);
-    setSync(s);
-    setPhaseFrames({
-      address: frames[r.phaseIdx.address] ?? null,
-      top: frames[r.phaseIdx.top] ?? null,
-      impact: frames[r.phaseIdx.impact] ?? null,
-      finish: frames[r.phaseIdx.finish] ?? null,
-    });
-    setSaved(false);
-    setStage("done");
   }
 
   async function save() {
@@ -283,12 +305,24 @@ export default function SwingPage() {
               <video
                 ref={videoRef}
                 playsInline
+                autoPlay
+                muted
                 className="absolute inset-0 w-full h-full object-contain"
+                style={{ transform: facing === "user" ? "scaleX(-1)" : undefined }}
               />
               <canvas
                 ref={canvasRef}
                 className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                style={{ transform: facing === "user" ? "scaleX(-1)" : undefined }}
               />
+              {(stage === "ready" || stage === "prep") && (
+                <button
+                  onClick={switchCamera}
+                  className="absolute top-2 right-2 btn btn-ghost text-xs px-3 py-1.5"
+                >
+                  🔄 カメラ切替
+                </button>
+              )}
               {stage === "idle" && (
                 <div className="absolute inset-0 grid place-items-center text-center px-6">
                   <div>
@@ -346,7 +380,7 @@ export default function SwingPage() {
           <div className="grid grid-cols-2 gap-2 mt-3">
             {stage === "idle" || stage === "loading" ? (
               <>
-                <button onClick={startCamera} className="btn btn-primary py-3">
+                <button onClick={() => startCamera()} className="btn btn-primary py-3">
                   📷 カメラで撮影
                 </button>
                 <label className="btn btn-ghost py-3 text-center cursor-pointer">
