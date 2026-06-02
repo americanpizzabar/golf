@@ -51,19 +51,29 @@ export async function getPoseLandmarker(): Promise<PoseLandmarker> {
       const vision = await FilesetResolver.forVisionTasks(
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm",
       );
-      return PoseLandmarker.createFromOptions(vision, {
+      const opts = (delegate: "GPU" | "CPU") => ({
         baseOptions: {
           modelAssetPath:
             "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-          delegate: "GPU",
+          delegate,
         },
-        runningMode: "VIDEO",
+        runningMode: "VIDEO" as const,
         numPoses: 1,
         minPoseDetectionConfidence: 0.5,
         minPosePresenceConfidence: 0.5,
         minTrackingConfidence: 0.5,
       });
+      try {
+        return await PoseLandmarker.createFromOptions(vision, opts("GPU"));
+      } catch {
+        // Some devices/browsers lack the WebGPU/WebGL delegate — fall back to CPU.
+        return await PoseLandmarker.createFromOptions(vision, opts("CPU"));
+      }
     })();
+    // Don't permanently cache a rejected init (e.g. transient network failure).
+    landmarkerPromise.catch(() => {
+      landmarkerPromise = null;
+    });
   }
   return landmarkerPromise;
 }

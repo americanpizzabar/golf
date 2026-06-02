@@ -95,7 +95,7 @@ export interface SwingResult {
   swingPlane: number;
   tempoRatio: number;
   swayCm: number;
-  leadArmFinish: number; // for chicken wing
+  leadArmImpact: number; // for chicken wing (lead arm angle at impact)
   phaseIdx: { address: number; top: number; impact: number; finish: number };
   valid: boolean;
 }
@@ -169,9 +169,9 @@ export function analyzeSwing(
   const heightCm = opts.heightCm ?? 170;
   const swayCm = Math.round((maxHipShift / bodyPx) * heightCm);
 
-  const leadArmFinish = Math.round(
-    Math.min(fm[impactIdx].leadArmAngle, fm[finishIdx].leadArmAngle),
-  );
+  // Chicken-wing is judged at impact (the lead arm should still be extended).
+  // The follow-through naturally folds the arm, so it must NOT be averaged in.
+  const leadArmImpact = Math.round(fm[impactIdx].leadArmAngle);
 
   return {
     angles,
@@ -181,7 +181,7 @@ export function analyzeSwing(
     swingPlane: angles.top.swingPlane,
     tempoRatio,
     swayCm,
-    leadArmFinish,
+    leadArmImpact,
     phaseIdx: {
       address: addressIdx,
       top: topIdx,
@@ -219,7 +219,10 @@ export function matchPro(
   const ranking = pros
     .map((p) => {
       const dh = Math.abs(p.height_cm - h) / 25; // ~25cm spread
-      const da = Math.abs(p.arm_span_cm / 2 / p.height_cm - userArm) * 6;
+      // Approx one-arm (shoulder→wrist) length from wingspan minus shoulders,
+      // to match the user's hand-measured arm length dimension.
+      const proArm = (p.arm_span_cm - p.shoulder_width_cm) / 2;
+      const da = Math.abs(proArm / p.height_cm - userArm) * 6;
       const ds = Math.abs(p.shoulder_width_cm / p.height_cm - userSh) * 6;
       const dl = Math.abs(p.leg_length_cm / p.height_cm - userLeg) * 6;
       const score = dh * 0.45 + da * 0.2 + ds * 0.15 + dl * 0.2;
@@ -248,14 +251,14 @@ export function detectFaults(r: SwingResult, pro: Pro | null): Fault[] {
     });
   }
 
-  // チキンウィング（左肘の引け）: lead arm collapses (bent) through impact/finish
-  if (r.leadArmFinish < 150) {
-    const dev = Math.round(170 - r.leadArmFinish);
+  // チキンウィング（左肘の引け）: lead arm bent at impact (should be ~extended).
+  if (r.leadArmImpact < 155) {
+    const dev = Math.round(165 - r.leadArmImpact);
     faults.push({
       code: "chicken_wing",
       label: "チキンウィング（左肘の引け）",
       severity: sev(dev, 18, 30),
-      detail: `インパクト〜フォローでリード腕が${dev}°曲がっています。腕を長く保ち、体の回転で振り抜きましょう。`,
+      detail: `インパクトでリード腕が${dev}°曲がっています。腕を長く保ち、体の回転で振り抜きましょう。`,
       deg: dev,
     });
   }
@@ -276,14 +279,17 @@ export function detectFaults(r: SwingResult, pro: Pro | null): Fault[] {
       });
     }
 
-    // 肩の回転不足
-    const turnDev = Math.round(pro.shoulder_turn_deg - r.shoulderTurn);
-    if (turnDev >= 12) {
+    // 肩の回転不足: only when the measured turn is genuinely shallow.
+    // (The 2D width-foreshortening proxy maxes near 90°, so we compare against
+    //  an attainable target rather than the raw pro value to avoid over-firing.)
+    const target = Math.min(85, pro.shoulder_turn_deg);
+    const turnDev = Math.round(target - r.shoulderTurn);
+    if (r.shoulderTurn < 72 && turnDev >= 12) {
       faults.push({
         code: "low_shoulder_turn",
         label: "肩の回転不足",
         severity: sev(turnDev, 18, 28),
-        detail: `トップの肩の回転が理想より${turnDev}°浅いです。背中をターゲットに向ける意識を。`,
+        detail: `トップの肩の回転が浅めです（${r.shoulderTurn}°）。背中をターゲットに向ける意識を。`,
         deg: turnDev,
       });
     }
@@ -300,16 +306,9 @@ export function detectFaults(r: SwingResult, pro: Pro | null): Fault[] {
     }
   }
 
-  // アーリーリリース（ヒップ先行不足の代理指標）
-  if (r.hipTurn < r.shoulderTurn - 30) {
-    faults.push({
-      code: "early_release",
-      label: "アーリーリリースの傾向あり",
-      severity: "mid",
-      detail:
-        "ダウンで上体が先行し、手元がほどけやすい状態です。下半身リードを意識しましょう。",
-    });
-  }
+  // 注: アーリーリリース（キャスティング）はクラブ位置が必要で、単一2Dカメラ＋
+  //     骨格のみでは信頼できる検出ができないため、誤診断を避けて自動判定は行わない。
+  //     （修正用ドリルは AIコーチの early_release カテゴリに用意してある）
 
   return faults;
 }

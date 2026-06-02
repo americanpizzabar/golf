@@ -9,7 +9,7 @@ import { analyzeSwing, detectFaults, matchPro, syncRate, type SwingResult } from
 import { fetchPros, getProfile, saveSwing } from "@/lib/db";
 import type { Pro, Profile, Fault, SwingAngles } from "@/lib/types";
 
-type Stage = "idle" | "loading" | "ready" | "recording" | "analyzing" | "done";
+type Stage = "idle" | "loading" | "ready" | "prep" | "recording" | "analyzing" | "done";
 
 export default function SwingPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -131,6 +131,21 @@ export default function SwingPage() {
   }
 
   function startRecording() {
+    // Prep countdown so a solo user has time to get into the frame and address.
+    setStage("prep");
+    let prep = 3;
+    setCountdown(prep);
+    const pv = setInterval(() => {
+      prep -= 1;
+      setCountdown(prep);
+      if (prep <= 0) {
+        clearInterval(pv);
+        beginCapture();
+      }
+    }, 1000);
+  }
+
+  function beginCapture() {
     framesRef.current = [];
     recordingRef.current = true;
     setStage("recording");
@@ -201,9 +216,9 @@ export default function SwingPage() {
       <PageHeader title="スイングAI解析" subtitle="骨格をリアルタイム計測・プロと比較" back />
 
       <div className="px-4 space-y-4">
-        {!pro && (
+        {!profile?.height_cm && (
           <Link href="/profile" className="card p-3 text-sm block">
-            ⚠️ 先に<span style={{ color: "var(--green)" }}>体型プロフィール</span>を登録すると、最適なプロと比較できます。
+            ⚠️ 先に<span style={{ color: "var(--green)" }}>体型プロフィール</span>を登録すると、あなたに最適なプロと比較できます（未登録時は標準体型で比較）。
           </Link>
         )}
 
@@ -233,6 +248,16 @@ export default function SwingPage() {
               {stage === "loading" && (
                 <div className="absolute inset-0 grid place-items-center">
                   <Spinner label="AIモデルを準備中…" />
+                </div>
+              )}
+              {stage === "prep" && (
+                <div className="absolute inset-0 grid place-items-center bg-black/30">
+                  <div className="text-center">
+                    <div className="text-6xl font-extrabold" style={{ color: "var(--green)" }}>
+                      {countdown}
+                    </div>
+                    <div className="text-sm mt-1">構えてください</div>
+                  </div>
                 </div>
               )}
               {stage === "recording" && countdown > 0 && (
@@ -268,11 +293,15 @@ export default function SwingPage() {
               </>
             ) : stage === "ready" ? (
               <button onClick={startRecording} className="btn btn-primary py-3 col-span-2">
-                ⏺ 5秒間スイングを解析
+                ⏺ スイングを解析（3秒後に5秒間撮影）
               </button>
             ) : (
               <div className="col-span-2 text-center text-sm py-3" style={{ color: "var(--muted)" }}>
-                {stage === "recording" ? "スイングしてください…" : "解析中…"}
+                {stage === "prep"
+                  ? "構えてください…"
+                  : stage === "recording"
+                    ? "スイングしてください…"
+                    : "解析中…"}
               </div>
             )}
           </div>
@@ -375,7 +404,7 @@ function Results({
           <KV k="前傾(背骨)角" v={`${result.spineTilt}°`} ref_={pro?.spine_tilt_deg} unit="°" />
           <KV k="テンポ比" v={`${result.tempoRatio}`} ref_={pro?.tempo_ratio} unit="" />
           <KV k="軸の横ブレ" v={`${result.swayCm}cm`} />
-          <KV k="リード腕(フォロー)" v={`${result.leadArmFinish}°`} />
+          <KV k="リード腕(インパクト)" v={`${result.leadArmImpact}°`} />
         </div>
       </Card>
 
@@ -472,7 +501,6 @@ function PlaneCompare({ user, proDeg, accent }: { user: number; proDeg: number; 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
       <line x1={cx} y1={cy} x2={W - 10} y2={cy} stroke="var(--line)" strokeWidth={1} />
-      <line x1={cx} y1={p.y} x2={p.x} y2={p.y} stroke="transparent" />
       <line x1={cx} y1={cy} x2={p.x} y2={p.y} stroke={accent} strokeWidth={3} strokeLinecap="round" />
       <line x1={cx} y1={cy} x2={u.x} y2={u.y} stroke="var(--cyan)" strokeWidth={3} strokeDasharray="6 4" strokeLinecap="round" />
       <circle cx={cx} cy={cy} r={4} fill="#fff" />
