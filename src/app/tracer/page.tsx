@@ -36,35 +36,27 @@ interface Blob {
   moved: boolean;
 }
 
-// Find golf-ball-like blobs: small, bright-WHITE (low saturation), roundish.
-// requireMotion=true also requires the region to have changed since prev frame
-// (the ball in flight); false also returns the resting ball at address.
-function findBallBlobs(
+// Find moving blobs of ANY color (golf balls may be white, yellow, orange…).
+// Outdoors the struck ball is identified by SPEED + trajectory continuity, not
+// color: here we extract small, compact moving regions; the caller picks the
+// fastest-moving one as the ball.
+function findMovingBlobs(
   cur: Uint8ClampedArray,
   prev: Uint8ClampedArray,
   w: number,
   h: number,
-  requireMotion: boolean,
 ): Blob[] {
   const n = w * h;
-  const mask = new Uint8Array(n); // 1 = white candidate, 2 = white & moved
+  const mask = new Uint8Array(n);
   for (let p = 0, i = 0; p < n; p++, i += 4) {
-    const r = cur[i];
-    const g = cur[i + 1];
-    const b = cur[i + 2];
-    const mn = Math.min(r, g, b);
-    const mx = Math.max(r, g, b);
-    const white = mn > 140 && mx - mn < 55; // bright + low saturation
-    if (!white) continue;
-    const moved =
-      Math.abs(r - prev[i]) + Math.abs(g - prev[i + 1]) + Math.abs(b - prev[i + 2]) > 55;
-    if (requireMotion && !moved) continue;
-    mask[p] = moved ? 2 : 1;
+    // Frame difference (motion). A fast ball produces a strong local change.
+    const d =
+      Math.abs(cur[i] - prev[i]) + Math.abs(cur[i + 1] - prev[i + 1]) + Math.abs(cur[i + 2] - prev[i + 2]);
+    if (d > 60) mask[p] = 1;
   }
 
   const BALL_MIN = 2;
-  const BALL_MAX = requireMotion ? 260 : 110; // flight streaks can be larger
-  const minFill = requireMotion ? 0.25 : 0.42;
+  const BALL_MAX = 150; // a small object; the body/club connect into larger blobs
   const blobs: Blob[] = [];
   const stack = new Int32Array(n);
   const seen = new Uint8Array(n);
@@ -74,7 +66,6 @@ function findBallBlobs(
     stack[sp++] = start;
     seen[start] = 1;
     let count = 0;
-    let movedCnt = 0;
     let sumX = 0;
     let sumY = 0;
     let minX = w;
@@ -86,7 +77,6 @@ function findBallBlobs(
       const px = p % w;
       const py = (p / w) | 0;
       count++;
-      if (mask[p] === 2) movedCnt++;
       sumX += px;
       sumY += py;
       if (px < minX) minX = px;
@@ -102,16 +92,15 @@ function findBallBlobs(
     const bw = maxX - minX + 1;
     const bh = maxY - minY + 1;
     const aspect = bw / bh;
-    if (aspect < 0.33 || aspect > 3) continue;
+    if (aspect < 0.25 || aspect > 4) continue; // allow some motion-blur streaking
     const fill = count / (bw * bh);
-    if (fill < minFill) continue;
+    if (fill < 0.3) continue;
     blobs.push({
       x: sumX / count / w,
       y: sumY / count / h,
       size: count,
-      // Prefer round & compact, lightly penalize larger blobs.
-      score: fill - count / (BALL_MAX * 2),
-      moved: movedCnt / count > 0.5,
+      score: fill - count / (BALL_MAX * 2), // prefer small & compact
+      moved: true,
     });
   }
   blobs.sort((a, b) => b.score - a.score);
@@ -162,12 +151,10 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const activeRef = useRef(false);
   const ptsRef = useRef<Pt[]>([]);
   const velRef = useRef<Pt>({ x: 0, y: 0 });
-  const restRef = useRef<Pt | null>(null); // resting (address) ball position
-  const lastMovingRef = useRef<Pt | null>(null);
+  const prevBlobsRef = useRef<Blob[]>([]); // last frame's moving blobs
   const lastSeenRef = useRef(0);
   const startMsRef = useRef(0);
-  const ballReadyRef = useRef(false);
-  const [ballReady, setBallReady] = useState(false);
+  const [tracking, setTracking] = useState(false);
 
   const [camOn, setCamOn] = useState(false);
   const [club, setClub] = useState("DR");
@@ -230,8 +217,8 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     prevRef.current = null;
     activeRef.current = false;
     ptsRef.current = [];
-    restRef.current = null;
-    lastMovingRef.current = null;
+    prevBlobsRef.current = [];
+    setTracking(false);
     setResult(null);
     setCamOn(true);
     rafRef.current = requestAnimationFrame(loop);
@@ -241,7 +228,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     cancelAnimationFrame(rafRef.current);
-    setReady(false);
+    setTracking(false);
     setCamOn(false);
   }
 
@@ -270,24 +257,20 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     rafRef.current = requestAnimationFrame(loop);
   }
 
-  function setReady(v: boolean) {
-    if (ballReadyRef.current !== v) {
-      ballReadyRef.current = v;
-      setBallReady(v);
-    }
-  }
+  // Launch when a small blob suddenly moves fast (the struck ball is by far the
+  // fastest object in frame); confirmed by trajectory length in finalize().
+  const LAUNCH = 0.035; // normalized displacement / frame
+  const GATE = 0.34; // tracking search radius
 
   function detectStep(cur: Uint8ClampedArray, prev: Uint8ClampedArray, w: number, h: number, now: number) {
-    // Only the golf ball: small, bright-WHITE (low saturation), roundish blobs.
-    const moving = findBallBlobs(cur, prev, w, h, true); // white + just moved
-    const still = findBallBlobs(cur, prev, w, h, false); // white (incl. at rest)
+    const moving = findMovingBlobs(cur, prev, w, h);
 
     if (activeRef.current) {
-      // Track the ball: pick the moving white blob nearest the predicted spot.
+      // Track the ball: nearest moving blob to the predicted (vel-extrapolated) spot.
       const last = ptsRef.current[ptsRef.current.length - 1];
       const pred = { x: last.x + velRef.current.x, y: last.y + velRef.current.y };
       let best: Blob | null = null;
-      let bd = 0.32; // search gate (normalized)
+      let bd = GATE;
       for (const b of moving) {
         const d = Math.hypot(b.x - pred.x, b.y - pred.y);
         if (d < bd) {
@@ -300,55 +283,51 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
         ptsRef.current.push({ x: best.x, y: best.y });
         lastSeenRef.current = now;
       }
-      if (now - lastSeenRef.current > 200 || now - startMsRef.current > 2500) finalize();
+      if (now - lastSeenRef.current > 180 || now - startMsRef.current > 2500) finalize();
+      prevBlobsRef.current = moving;
       return;
     }
 
-    // Idle: keep a lock on the resting ball, and watch for it launching.
-    const rest = restRef.current;
-    const bestMoving = moving[0] ?? null;
-
-    if (rest && bestMoving) {
-      // The ball took off: a white blob appears clearly away from address.
-      const d = Math.hypot(bestMoving.x - rest.x, bestMoving.y - rest.y);
-      if (d > 0.05) {
-        activeRef.current = true;
-        ptsRef.current = [rest, { x: bestMoving.x, y: bestMoving.y }];
-        velRef.current = { x: bestMoving.x - rest.x, y: bestMoving.y - rest.y };
-        lastSeenRef.current = now;
-        startMsRef.current = now;
-        return;
+    // Idle: find the blob that just moved the FASTEST (largest displacement from
+    // any blob in the previous frame) — that's the launched ball.
+    let launchBlob: Blob | null = null;
+    let launchFrom: Pt | null = null;
+    let bestDisp = LAUNCH;
+    for (const b of moving) {
+      let near = 1;
+      let from: Pt | null = null;
+      for (const pb of prevBlobsRef.current) {
+        const d = Math.hypot(b.x - pb.x, b.y - pb.y);
+        if (d < near) {
+          near = d;
+          from = { x: pb.x, y: pb.y };
+        }
       }
-    } else if (!rest && bestMoving && lastMovingRef.current) {
-      // Fallback (no clear address lock): catch a fast white blob in flight.
-      const d = Math.hypot(bestMoving.x - lastMovingRef.current.x, bestMoving.y - lastMovingRef.current.y);
-      if (d > 0.04 && d < 0.4) {
-        activeRef.current = true;
-        ptsRef.current = [lastMovingRef.current, { x: bestMoving.x, y: bestMoving.y }];
-        velRef.current = { x: bestMoving.x - lastMovingRef.current.x, y: bestMoving.y - lastMovingRef.current.y };
-        lastSeenRef.current = now;
-        startMsRef.current = now;
-        return;
+      if (near > bestDisp && near < 0.45) {
+        bestDisp = near;
+        launchBlob = b;
+        launchFrom = from;
       }
     }
-    lastMovingRef.current = bestMoving ? { x: bestMoving.x, y: bestMoving.y } : null;
-
-    // Update the resting-ball lock from the most ball-like stationary white blob
-    // in the lower part of the frame (where a teed/grounded ball sits).
-    const restCand = still.find((b) => b.y > 0.3 && !b.moved);
-    if (restCand) {
-      restRef.current = { x: restCand.x, y: restCand.y };
-      setReady(true);
-    } else if (!still.some((b) => b.y > 0.3)) {
-      setReady(false);
+    if (launchBlob) {
+      activeRef.current = true;
+      ptsRef.current = launchFrom
+        ? [launchFrom, { x: launchBlob.x, y: launchBlob.y }]
+        : [{ x: launchBlob.x, y: launchBlob.y }];
+      velRef.current = launchFrom
+        ? { x: launchBlob.x - launchFrom.x, y: launchBlob.y - launchFrom.y }
+        : { x: 0, y: 0 };
+      lastSeenRef.current = now;
+      startMsRef.current = now;
+      setTracking(true);
     }
+    prevBlobsRef.current = moving;
   }
 
   function finalize() {
     activeRef.current = false;
-    restRef.current = null;
-    lastMovingRef.current = null;
-    setReady(false);
+    prevBlobsRef.current = [];
+    setTracking(false);
     const pts = ptsRef.current.slice();
     ptsRef.current = [];
     if (pts.length < 4) return; // too few points to be a real ball flight
@@ -418,17 +397,17 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
               <div>
                 <div className="text-4xl mb-2">🎥</div>
                 <p className="text-sm" style={{ color: "var(--muted)" }}>
-                  白いゴルフボールが画面にはっきり映るように<br />
-                  後方からカメラを構えてください。<br />
-                  ボールを捕捉すると自動で計測します。
+                  飛球線の後方から、ボールと打ち出し方向が<br />
+                  両方映るようにカメラを固定してください。<br />
+                  打つと弾道を自動で検知・描画します（屋外OK）。
                 </p>
               </div>
             </div>
           )}
           {camOn && (
             <div className="absolute top-2 left-2 px-3 py-1 rounded-full text-xs font-bold"
-              style={{ background: "rgba(0,0,0,0.6)", color: ballReady ? "#4ade80" : "#fff" }}>
-              {ballReady ? "● ボール捕捉 — 打ってOK" : "○ ボールを探しています…"}
+              style={{ background: "rgba(0,0,0,0.6)", color: tracking ? "#4ade80" : "#fff" }}>
+              {tracking ? "● 弾道を追跡中…" : "○ 監視中 — 打ってください"}
             </div>
           )}
           {camOn && (
@@ -495,8 +474,8 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       )}
 
       <p className="text-[11px] leading-relaxed px-1" style={{ color: "var(--muted)" }}>
-        ※ 白いゴルフボールのみを検出して軌跡を追跡し、球筋（ストレート/ドロー/フェード/スライス/フック）を判定します。
-        明るい白色・小さく丸い被写体をボールとみなすため、白い服や白背景が多いと精度が下がります。
+        ※ ボールの色は問いません。打ち出された「小さく速く動く物体」を弾道として追跡し、球筋（ストレート/ドロー/フェード/スライス/フック）を判定します。
+        カメラは三脚等で固定すると精度が上がります（手ブレ・強風で背景が大きく動くと検知しにくくなります）。
         飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（クラブ非検出のためβ）。
       </p>
     </div>
