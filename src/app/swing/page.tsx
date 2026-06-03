@@ -31,13 +31,16 @@ export default function SwingPage() {
   const rafRef = useRef<number>(0);
   const lastTsRef = useRef(0);
   const streamRef = useRef<MediaStream | null>(null);
+  const trackRef = useRef<MediaStreamTrack | null>(null);
   const landmarkerRef = useRef<Awaited<ReturnType<typeof getPoseLandmarker>> | null>(null);
 
   // Continuous rolling buffer + auto-detector state (all refs — the rAF loop
   // reschedules itself and must read the latest values without stale closures).
   const bufferRef = useRef<Stamped[]>([]);
-  const uploadFramesRef = useRef<Frame[]>([]);
+  const uploadFramesRef = useRef<Stamped[]>([]);
   const uploadingRef = useRef(false);
+  const manualRecRef = useRef(false);
+  const manualFramesRef = useRef<Stamped[]>([]);
   const prevPoseRef = useRef<Frame | null>(null);
   const swingActiveRef = useRef(false);
   const windowStartRef = useRef(0);
@@ -52,7 +55,14 @@ export default function SwingPage() {
   const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [facing, setFacing] = useState<"environment" | "user">("environment");
   const [autoDetect, setAutoDetect] = useState(true);
+  const [manualRec, setManualRec] = useState(false);
   const [watch, setWatch] = useState("");
+  const [notice, setNotice] = useState("");
+  const [zoom, setZoom] = useState(1);
+  const [hasNativeZoom, setHasNativeZoom] = useState(false);
+  const [zoomCaps, setZoomCaps] = useState<{ min: number; max: number; step: number } | null>(null);
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [deviceId, setDeviceId] = useState<string>("");
   const [pros, setPros] = useState<Pro[]>([]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [pro, setPro] = useState<Pro | null>(null);
@@ -156,7 +166,11 @@ export default function SwingPage() {
           if (pose) {
             drawSkeleton(ctx, pose, canvas.width, canvas.height);
             if (uploadingRef.current) {
-              uploadFramesRef.current.push(pose);
+              // Use the clip's own time so the swing can be cropped accurately.
+              uploadFramesRef.current.push({ lm: pose, t: video.currentTime * 1000 });
+            } else if (manualRecRef.current) {
+              // Manual record (auto-detect OFF): collect everything start→stop.
+              manualFramesRef.current.push({ lm: pose, t: ts });
             } else {
               // Maintain rolling buffer and run the continuous detector.
               bufferRef.current.push({ lm: pose, t: ts });
@@ -238,25 +252,25 @@ export default function SwingPage() {
     return "カメラを起動できませんでした。権限を確認するか、動画アップロードをお試しください。";
   }
 
-  async function startCamera(facingOverride?: "environment" | "user") {
+  async function startCamera(opts?: { facing?: "environment" | "user"; deviceId?: string }) {
     setErr("");
     if (!navigator.mediaDevices?.getUserMedia) {
       setErr("このブラウザ/接続ではカメラを利用できません（HTTPS環境が必要です）。動画アップロードをご利用ください。");
       return;
     }
-    const want = facingOverride ?? facing;
-    // Stop any existing stream first (needed when switching cameras).
+    const want = opts?.facing ?? facing;
+    // Stop any existing stream first (needed when switching cameras / lenses).
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setStage("loading");
+    const videoConstraint: MediaTrackConstraints = opts?.deviceId
+      ? { deviceId: { exact: opts.deviceId }, width: { ideal: 1280 } }
+      : { facingMode: { ideal: want }, width: { ideal: 1280 } };
     let stream: MediaStream | null = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: want }, width: { ideal: 720 } },
-        audio: false,
-      });
+      stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraint, audio: false });
     } catch {
-      // Fallback: some devices have no camera matching the requested facing.
+      // Fallback: some devices have no camera matching the requested facing/lens.
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       } catch (e2) {
@@ -275,28 +289,108 @@ export default function SwingPage() {
     } catch {
       /* play() can reject under autoplay policy; loop guards on readyState */
     }
+
+    // Inspect the track for native zoom (optical/sensor) capability and enumerate lenses.
+    const track = stream.getVideoTracks()[0] ?? null;
+    trackRef.current = track;
+    setDeviceId(track?.getSettings().deviceId ?? opts?.deviceId ?? "");
+    setupZoom(track);
+    enumerateLenses();
+
     resetDetector();
     uploadingRef.current = false;
+    setNotice("");
     setWatch("待機中（自動検出ON）");
     setStage("ready");
     startLoop();
     void ensureModel(); // load AI in the background — camera is already live
   }
 
+  // `zoom` is a non-standard (but widely shipped) capability not in the DOM types.
+  function zoomCapability(track: MediaStreamTrack | null) {
+    if (!track?.getCapabilities) return undefined;
+    const caps = track.getCapabilities() as unknown as {
+      zoom?: { min: number; max: number; step?: number };
+    };
+    return caps.zoom;
+  }
+
+  function setupZoom(track: MediaStreamTrack | null) {
+    setZoom(1);
+    const z = zoomCapability(track);
+    if (z && z.max > z.min) {
+      setHasNativeZoom(true);
+      setZoomCaps({ min: z.min, max: z.max, step: z.step || 0.1 });
+      const cur = (track?.getSettings() as unknown as { zoom?: number })?.zoom;
+      if (cur) setZoom(cur);
+    } else {
+      // No native zoom → CSS digital zoom (display only) up to 3x.
+      setHasNativeZoom(false);
+      setZoomCaps({ min: 1, max: 3, step: 0.1 });
+    }
+  }
+
+  function applyZoom(z: number) {
+    setZoom(z);
+    const track = trackRef.current;
+    if (track && zoomCapability(track)) {
+      track
+        .applyConstraints({ advanced: [{ zoom: z } as unknown as MediaTrackConstraintSet] })
+        .catch(() => {});
+    }
+    // else: handled by CSS transform on the video/canvas (digital zoom)
+  }
+
+  async function enumerateLenses() {
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      setDevices(all.filter((d) => d.kind === "videoinput"));
+    } catch {
+      /* ignore */
+    }
+  }
+
   function switchCamera() {
     const next = facing === "environment" ? "user" : "environment";
     setFacing(next);
-    startCamera(next);
+    startCamera({ facing: next });
   }
 
-  // Manual fallback: analyze whatever swing is in the last ~5s rolling buffer.
-  function manualAnalyze() {
-    const now = lastTsRef.current || performance.now();
-    const span = bufferRef.current.filter((b) => b.t >= now - 5000);
+  // Manual capture (auto-detect OFF): explicit start → stop, no time limit.
+  function startManual() {
+    manualFramesRef.current = [];
+    manualRecRef.current = true;
+    setManualRec(true);
+    setNotice("");
+    setWatch("記録中… スイングしてください");
+  }
+  function stopManual() {
+    manualRecRef.current = false;
+    setManualRec(false);
+    const span = manualFramesRef.current;
     const frames = span.map((b) => b.lm);
     const durSec = span.length > 1 ? (span[span.length - 1].t - span[0].t) / 1000 : 1;
     const fps = durSec > 0 ? frames.length / durSec : 30;
     finishAnalysis(frames, fps);
+  }
+
+  // Find the swing window inside a sequence of timestamped frames (motion burst
+  // preceded by a quiet address). Returns the cropped sub-sequence + range.
+  function segmentSwing(span: Stamped[]): { frames: Stamped[]; startSec: number; endSec: number } {
+    if (span.length < 12) return { frames: span, startSec: 0, endSec: 0 };
+    const energies = span.map((f, i) => (i ? motionEnergy(f.lm, span[i - 1].lm) : 0));
+    let peakI = 0;
+    let peak = 0;
+    energies.forEach((e, i) => {
+      if (e > peak) {
+        peak = e;
+        peakI = i;
+      }
+    });
+    const peakT = span[peakI].t;
+    const seg = span.filter((f) => f.t >= peakT - 1600 && f.t <= peakT + 900);
+    if (seg.length < 8) return { frames: span, startSec: 0, endSec: span[span.length - 1].t / 1000 };
+    return { frames: seg, startSec: seg[0].t / 1000, endSec: seg[seg.length - 1].t / 1000 };
   }
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -312,7 +406,7 @@ export default function SwingPage() {
       video.src = URL.createObjectURL(file);
       video.muted = true;
       video.playsInline = true;
-      // For a file we can wait for the model so the whole clip is analyzed.
+      // For a file we can wait for the model so the whole clip is scanned.
       const lm = await ensureModel();
       if (!lm) {
         setStage("idle");
@@ -324,11 +418,17 @@ export default function SwingPage() {
       startLoop();
       setStage("analyzing");
       setWatch("");
+      setNotice("動画をスキャンしてスイング箇所を自動抽出中…");
       video.onended = () => {
         uploadingRef.current = false;
-        const frames = uploadFramesRef.current;
-        // Assume ~30fps for an arbitrary uploaded clip.
-        finishAnalysis(frames, 30);
+        // Auto-detect & crop the swing within the uploaded clip.
+        const { frames, startSec, endSec } = segmentSwing(uploadFramesRef.current);
+        const durSec = frames.length > 1 ? (frames[frames.length - 1].t - frames[0].t) / 1000 : 1;
+        const fps = durSec > 0 ? frames.length / durSec : 30;
+        if (endSec > startSec) {
+          setNotice(`スイング箇所を自動抽出： ${startSec.toFixed(1)}秒〜${endSec.toFixed(1)}秒を解析`);
+        }
+        finishAnalysis(frames.map((f) => f.lm), fps);
       };
     } catch (e) {
       setErr("動画を読み込めませんでした。別の動画ファイルでお試しください。");
@@ -403,6 +503,14 @@ export default function SwingPage() {
   }
 
   const showCamera = stage !== "done";
+  // Mirror the front camera; apply CSS digital zoom only when the device has no
+  // native (optical/sensor) zoom.
+  const digitalZoom = !hasNativeZoom && zoom > 1 ? ` scale(${zoom})` : "";
+  const cameraTransform = `${facing === "user" ? "scaleX(-1)" : ""}${digitalZoom}` || undefined;
+  const swingHot = manualRec || watch.includes("検出");
+  const backLenses = devices.filter(
+    (d) => !/front|user|前面/i.test(d.label) || devices.length <= 2,
+  );
 
   return (
     <main>
@@ -425,32 +533,32 @@ export default function SwingPage() {
                 autoPlay
                 muted
                 className="absolute inset-0 w-full h-full object-contain"
-                style={{ transform: facing === "user" ? "scaleX(-1)" : undefined }}
+                style={{ transform: cameraTransform }}
               />
               <canvas
                 ref={canvasRef}
                 className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-                style={{ transform: facing === "user" ? "scaleX(-1)" : undefined }}
+                style={{ transform: cameraTransform }}
               />
               {stage === "ready" && (
                 <button
                   onClick={switchCamera}
                   className="absolute top-2 right-2 btn btn-ghost text-xs px-3 py-1.5"
                 >
-                  🔄 カメラ切替
+                  🔄 前後切替
                 </button>
               )}
-              {stage === "ready" && autoDetect && modelState === "ready" && watch && (
+              {stage === "ready" && modelState === "ready" && watch && (autoDetect || manualRec) && (
                 <div
                   className="absolute top-2 left-2 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1.5"
                   style={{
-                    background: swingActiveRef.current ? "var(--red)" : "rgba(0,0,0,0.6)",
+                    background: swingHot ? "var(--red)" : "rgba(0,0,0,0.6)",
                     color: "#fff",
                   }}
                 >
                   <span
                     className="inline-block w-2 h-2 rounded-full"
-                    style={{ background: swingActiveRef.current ? "#fff" : "var(--green)" }}
+                    style={{ background: swingHot ? "#fff" : "var(--green)" }}
                   />
                   {watch}
                 </div>
@@ -487,9 +595,67 @@ export default function SwingPage() {
             </div>
           </Card>
 
+          {/* Lens + zoom controls (live camera only) */}
+          {stage === "ready" && (
+            <div className="mt-3 space-y-2">
+              {devices.length > 1 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>レンズ</span>
+                  <select
+                    value={deviceId}
+                    onChange={(e) => startCamera({ deviceId: e.target.value })}
+                    className="flex-1 px-2 py-2 text-sm"
+                  >
+                    {backLenses.map((d, i) => (
+                      <option key={d.deviceId} value={d.deviceId}>
+                        {d.label || `カメラ ${i + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {zoomCaps && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>
+                    {zoomCaps.min < 1 ? "広角" : "ズーム"}
+                  </span>
+                  <button
+                    onClick={() => applyZoom(Math.max(zoomCaps.min, Math.round((zoom - (zoomCaps.step > 0.2 ? zoomCaps.step : 0.2)) * 10) / 10))}
+                    className="btn btn-ghost px-3 py-1.5 text-sm"
+                  >
+                    −
+                  </button>
+                  <input
+                    type="range"
+                    min={zoomCaps.min}
+                    max={zoomCaps.max}
+                    step={zoomCaps.step}
+                    value={zoom}
+                    onChange={(e) => applyZoom(Number(e.target.value))}
+                    className="flex-1"
+                  />
+                  <button
+                    onClick={() => applyZoom(Math.min(zoomCaps.max, Math.round((zoom + (zoomCaps.step > 0.2 ? zoomCaps.step : 0.2)) * 10) / 10))}
+                    className="btn btn-ghost px-3 py-1.5 text-sm"
+                  >
+                    ＋
+                  </button>
+                  <span className="text-xs w-10 text-right" style={{ color: "var(--cyan)" }}>
+                    {zoom.toFixed(1)}×
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
           {err && (
             <p className="text-xs mt-2" style={{ color: "var(--amber)" }}>
               {err}
+            </p>
+          )}
+          {notice && (
+            <p className="text-xs mt-2" style={{ color: "var(--cyan)" }}>
+              {notice}
             </p>
           )}
 
@@ -515,9 +681,7 @@ export default function SwingPage() {
                 </div>
               ) : (
                 <>
-                  <div
-                    className="card px-3 py-2.5 flex items-center justify-between"
-                  >
+                  <div className="card px-3 py-2.5 flex items-center justify-between">
                     <div>
                       <div className="text-sm font-semibold">自動スイング検出</div>
                       <div className="text-[11px]" style={{ color: "var(--muted)" }}>
@@ -525,7 +689,10 @@ export default function SwingPage() {
                       </div>
                     </div>
                     <button
-                      onClick={() => setAutoDetect((v) => !v)}
+                      onClick={() => {
+                        if (manualRec) return; // don't toggle mid-recording
+                        setAutoDetect((v) => !v);
+                      }}
                       className="btn px-3 py-1.5 text-xs"
                       style={{
                         background: autoDetect ? "var(--green)" : "var(--bg-soft)",
@@ -536,9 +703,20 @@ export default function SwingPage() {
                       {autoDetect ? "ON" : "OFF"}
                     </button>
                   </div>
-                  <button onClick={manualAnalyze} className="btn btn-ghost py-3 w-full">
-                    ⏱ 今のスイングを解析（手動）
-                  </button>
+                  {!autoDetect &&
+                    (manualRec ? (
+                      <button
+                        onClick={stopManual}
+                        className="btn py-3.5 w-full font-bold"
+                        style={{ background: "var(--red)", color: "#fff" }}
+                      >
+                        ■ 終了して解析
+                      </button>
+                    ) : (
+                      <button onClick={startManual} className="btn btn-primary py-3.5 w-full">
+                        ● 検知開始（手動）
+                      </button>
+                    ))}
                 </>
               )}
             </div>
