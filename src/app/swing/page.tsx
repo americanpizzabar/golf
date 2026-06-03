@@ -9,22 +9,50 @@ import { analyzeSwing, detectFaults, matchPro, syncRate, type SwingResult } from
 import { fetchPros, getProfile, saveSwing } from "@/lib/db";
 import type { Pro, Profile, Fault, SwingAngles } from "@/lib/types";
 
-type Stage = "idle" | "loading" | "ready" | "prep" | "recording" | "analyzing" | "done";
+type Stage = "idle" | "loading" | "ready" | "analyzing" | "done";
+
+// Motion-energy thresholds (mean normalized joint displacement per frame) used
+// by the continuous swing auto-detector. Tuned conservatively; the manual
+// "今のスイングを解析" button is always available as a fallback.
+const KEY_JOINTS = [15, 16, 11, 12, 23, 24]; // wrists, shoulders, hips
+const E_QUIET = 0.006; // at/below ≈ standing still (address)
+const E_BURST = 0.022; // above ≈ a real swing has started
+const E_SETTLE = 0.009; // motion has calmed (finish)
+const BUFFER_MS = 7000;
+
+interface Stamped {
+  lm: Frame;
+  t: number;
+}
 
 export default function SwingPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const framesRef = useRef<Frame[]>([]);
   const rafRef = useRef<number>(0);
   const lastTsRef = useRef(0);
   const streamRef = useRef<MediaStream | null>(null);
-  const recordingRef = useRef(false);
   const landmarkerRef = useRef<Awaited<ReturnType<typeof getPoseLandmarker>> | null>(null);
 
+  // Continuous rolling buffer + auto-detector state (all refs — the rAF loop
+  // reschedules itself and must read the latest values without stale closures).
+  const bufferRef = useRef<Stamped[]>([]);
+  const uploadFramesRef = useRef<Frame[]>([]);
+  const uploadingRef = useRef(false);
+  const prevPoseRef = useRef<Frame | null>(null);
+  const swingActiveRef = useRef(false);
+  const windowStartRef = useRef(0);
+  const peakTimeRef = useRef(0);
+  const peakEnergyRef = useRef(0);
+  const lastQuietRef = useRef(0);
+  const analyzingRef = useRef(false);
+  const stageRef = useRef<Stage>("idle");
+  const autoRef = useRef(true);
+
   const [stage, setStage] = useState<Stage>("idle");
-  const [countdown, setCountdown] = useState(0);
   const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [facing, setFacing] = useState<"environment" | "user">("environment");
+  const [autoDetect, setAutoDetect] = useState(true);
+  const [watch, setWatch] = useState("");
   const [pros, setPros] = useState<Pro[]>([]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [pro, setPro] = useState<Pro | null>(null);
@@ -34,6 +62,13 @@ export default function SwingPage() {
   const [phaseFrames, setPhaseFrames] = useState<Record<string, Frame | null>>({});
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState("");
+
+  useEffect(() => {
+    stageRef.current = stage;
+  }, [stage]);
+  useEffect(() => {
+    autoRef.current = autoDetect;
+  }, [autoDetect]);
 
   useEffect(() => {
     (async () => {
@@ -50,6 +85,31 @@ export default function SwingPage() {
     cancelAnimationFrame(rafRef.current);
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+  }
+
+  function resetDetector() {
+    bufferRef.current = [];
+    prevPoseRef.current = null;
+    swingActiveRef.current = false;
+    windowStartRef.current = 0;
+    peakTimeRef.current = 0;
+    peakEnergyRef.current = 0;
+    lastQuietRef.current = 0;
+    analyzingRef.current = false;
+  }
+
+  // Mean displacement of key joints between two poses (motion energy).
+  function motionEnergy(a: Frame, b: Frame): number {
+    let sum = 0;
+    let n = 0;
+    for (const i of KEY_JOINTS) {
+      const pa = a[i];
+      const pb = b[i];
+      if (!pa || !pb) continue;
+      sum += Math.hypot(pa.x - pb.x, pa.y - pb.y);
+      n++;
+    }
+    return n ? sum / n : 0;
   }
 
   // Load the MediaPipe model once. Never blocks the camera; if it fails the
@@ -92,10 +152,22 @@ export default function SwingPage() {
           lastTsRef.current = ts;
           const res = lm.detectForVideo(video, ts);
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          const pose = res.landmarks?.[0];
+          const pose = res.landmarks?.[0] as Frame | undefined;
           if (pose) {
-            drawSkeleton(ctx, pose as Frame, canvas.width, canvas.height);
-            if (recordingRef.current) framesRef.current.push(pose as Frame);
+            drawSkeleton(ctx, pose, canvas.width, canvas.height);
+            if (uploadingRef.current) {
+              uploadFramesRef.current.push(pose);
+            } else {
+              // Maintain rolling buffer and run the continuous detector.
+              bufferRef.current.push({ lm: pose, t: ts });
+              const cutoff = ts - BUFFER_MS;
+              while (bufferRef.current.length && bufferRef.current[0].t < cutoff) {
+                bufferRef.current.shift();
+              }
+              if (autoRef.current && stageRef.current === "ready" && !analyzingRef.current) {
+                runDetector(pose, ts);
+              }
+            }
           }
         } catch {
           /* transient detect errors are fine */
@@ -103,6 +175,56 @@ export default function SwingPage() {
       }
     }
     rafRef.current = requestAnimationFrame(loop);
+  }
+
+  // 常時監視：アドレス（静止）→始動→インパクト→フィニッシュを自動検知し、
+  // スイングシーンだけを切り出す。時間制限は一切なし。
+  function runDetector(pose: Frame, t: number) {
+    const prev = prevPoseRef.current;
+    prevPoseRef.current = pose;
+    if (!prev) return;
+    const energy = motionEnergy(pose, prev);
+    if (energy < E_QUIET) lastQuietRef.current = t;
+
+    if (!swingActiveRef.current) {
+      // Trigger only when a burst follows a recent quiet (address) period.
+      const wasRecentlyQuiet = lastQuietRef.current > 0 && t - lastQuietRef.current < 1500;
+      if (energy > E_BURST && wasRecentlyQuiet) {
+        swingActiveRef.current = true;
+        windowStartRef.current = lastQuietRef.current - 300; // include address
+        peakTimeRef.current = t;
+        peakEnergyRef.current = energy;
+        setWatch("スイングを検出！");
+      } else if (wasRecentlyQuiet) {
+        setWatch("構えを検出 — スイングをどうぞ");
+      } else {
+        setWatch("待機中（自動検出ON）");
+      }
+    } else {
+      if (energy > peakEnergyRef.current) {
+        peakEnergyRef.current = energy;
+        peakTimeRef.current = t;
+      }
+      const settled = energy < E_SETTLE && t - peakTimeRef.current > 300;
+      const tooLong = t - windowStartRef.current > 3500;
+      if (settled || tooLong) {
+        swingActiveRef.current = false;
+        const frames = bufferRef.current
+          .filter((b) => b.t >= windowStartRef.current && b.t <= peakTimeRef.current + 800)
+          .map((b) => b.lm);
+        if (frames.length >= 8) {
+          const span = bufferRef.current.filter(
+            (b) => b.t >= windowStartRef.current && b.t <= peakTimeRef.current + 800,
+          );
+          const durSec = (span[span.length - 1].t - span[0].t) / 1000;
+          const fps = durSec > 0 ? frames.length / durSec : 30;
+          finishAnalysis(frames, fps);
+        } else {
+          // False trigger — keep watching.
+          setWatch("待機中（自動検出ON）");
+        }
+      }
+    }
   }
 
   function cameraErrorMessage(e: unknown): string {
@@ -153,6 +275,9 @@ export default function SwingPage() {
     } catch {
       /* play() can reject under autoplay policy; loop guards on readyState */
     }
+    resetDetector();
+    uploadingRef.current = false;
+    setWatch("待機中（自動検出ON）");
     setStage("ready");
     startLoop();
     void ensureModel(); // load AI in the background — camera is already live
@@ -164,6 +289,16 @@ export default function SwingPage() {
     startCamera(next);
   }
 
+  // Manual fallback: analyze whatever swing is in the last ~5s rolling buffer.
+  function manualAnalyze() {
+    const now = lastTsRef.current || performance.now();
+    const span = bufferRef.current.filter((b) => b.t >= now - 5000);
+    const frames = span.map((b) => b.lm);
+    const durSec = span.length > 1 ? (span[span.length - 1].t - span[0].t) / 1000 : 1;
+    const fps = durSec > 0 ? frames.length / durSec : 30;
+    finishAnalysis(frames, fps);
+  }
+
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -171,6 +306,7 @@ export default function SwingPage() {
     setStage("loading");
     try {
       stopAll();
+      resetDetector();
       const video = videoRef.current!;
       video.srcObject = null;
       video.src = URL.createObjectURL(file);
@@ -182,12 +318,18 @@ export default function SwingPage() {
         setStage("idle");
         return;
       }
+      uploadFramesRef.current = [];
+      uploadingRef.current = true;
       await video.play().catch(() => {});
       startLoop();
-      framesRef.current = [];
-      recordingRef.current = true;
-      setStage("recording");
-      video.onended = () => finishAnalysis();
+      setStage("analyzing");
+      setWatch("");
+      video.onended = () => {
+        uploadingRef.current = false;
+        const frames = uploadFramesRef.current;
+        // Assume ~30fps for an arbitrary uploaded clip.
+        finishAnalysis(frames, 30);
+      };
     } catch (e) {
       setErr("動画を読み込めませんでした。別の動画ファイルでお試しください。");
       setStage("idle");
@@ -195,47 +337,17 @@ export default function SwingPage() {
     }
   }
 
-  function startRecording() {
-    // Prep countdown so a solo user has time to get into the frame and address.
-    setStage("prep");
-    let prep = 3;
-    setCountdown(prep);
-    const pv = setInterval(() => {
-      prep -= 1;
-      setCountdown(prep);
-      if (prep <= 0) {
-        clearInterval(pv);
-        beginCapture();
-      }
-    }, 1000);
-  }
-
-  function beginCapture() {
-    framesRef.current = [];
-    recordingRef.current = true;
-    setStage("recording");
-    let c = 5;
-    setCountdown(c);
-    const iv = setInterval(() => {
-      c -= 1;
-      setCountdown(c);
-      if (c <= 0) {
-        clearInterval(iv);
-        finishAnalysis();
-      }
-    }, 1000);
-  }
-
-  function finishAnalysis() {
-    recordingRef.current = false;
+  function finishAnalysis(frames: Frame[], fps: number) {
+    analyzingRef.current = true;
+    stageRef.current = "analyzing";
     setStage("analyzing");
-    const frames = framesRef.current;
     try {
       const detected = frames.length;
       const leftHanded = profile?.dominant_hand === "left";
       const r = analyzeSwing(frames, {
         heightCm: profile?.height_cm ?? undefined,
         leftHanded,
+        fps,
       });
       if (!r.valid) {
         setErr(
@@ -243,6 +355,9 @@ export default function SwingPage() {
             ? "骨格を検出できませんでした。全身（頭から足まで）がフレームに入るようカメラから2〜3m離れ、明るい場所で再撮影してください。"
             : "スイングをうまく解析できませんでした。全身が映る位置で、もう一度ゆっくりスイングしてみてください。",
         );
+        // Re-arm the continuous detector and keep watching.
+        resetDetector();
+        stageRef.current = "ready";
         setStage("ready");
         return;
       }
@@ -263,6 +378,8 @@ export default function SwingPage() {
     } catch (e) {
       console.error("swing analysis failed", e);
       setErr("解析中に問題が発生しました。もう一度お試しください。");
+      resetDetector();
+      stageRef.current = "ready";
       setStage("ready");
     }
   }
@@ -315,13 +432,28 @@ export default function SwingPage() {
                 className="absolute inset-0 w-full h-full object-contain pointer-events-none"
                 style={{ transform: facing === "user" ? "scaleX(-1)" : undefined }}
               />
-              {(stage === "ready" || stage === "prep") && (
+              {stage === "ready" && (
                 <button
                   onClick={switchCamera}
                   className="absolute top-2 right-2 btn btn-ghost text-xs px-3 py-1.5"
                 >
                   🔄 カメラ切替
                 </button>
+              )}
+              {stage === "ready" && autoDetect && modelState === "ready" && watch && (
+                <div
+                  className="absolute top-2 left-2 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1.5"
+                  style={{
+                    background: swingActiveRef.current ? "var(--red)" : "rgba(0,0,0,0.6)",
+                    color: "#fff",
+                  }}
+                >
+                  <span
+                    className="inline-block w-2 h-2 rounded-full"
+                    style={{ background: swingActiveRef.current ? "#fff" : "var(--green)" }}
+                  />
+                  {watch}
+                </div>
               )}
               {stage === "idle" && (
                 <div className="absolute inset-0 grid place-items-center text-center px-6">
@@ -347,25 +479,9 @@ export default function SwingPage() {
                   AI解析エンジン準備中…
                 </div>
               )}
-              {stage === "prep" && (
-                <div className="absolute inset-0 grid place-items-center bg-black/30">
-                  <div className="text-center">
-                    <div className="text-6xl font-extrabold" style={{ color: "var(--green)" }}>
-                      {countdown}
-                    </div>
-                    <div className="text-sm mt-1">構えてください</div>
-                  </div>
-                </div>
-              )}
-              {stage === "recording" && countdown > 0 && (
-                <div className="absolute top-3 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full text-sm font-bold"
-                  style={{ background: "var(--red)", color: "#fff" }}>
-                  ● 撮影中 {countdown}
-                </div>
-              )}
               {stage === "analyzing" && (
                 <div className="absolute inset-0 grid place-items-center bg-black/40">
-                  <Spinner label="解析中…" />
+                  <Spinner label="スイングを解析中…" />
                 </div>
               )}
             </div>
@@ -377,39 +493,56 @@ export default function SwingPage() {
             </p>
           )}
 
-          <div className="grid grid-cols-2 gap-2 mt-3">
-            {stage === "idle" || stage === "loading" ? (
-              <>
-                <button onClick={() => startCamera()} className="btn btn-primary py-3">
-                  📷 カメラで撮影
-                </button>
-                <label className="btn btn-ghost py-3 text-center cursor-pointer">
-                  🎞 動画を選択
-                  <input type="file" accept="video/*" className="hidden" onChange={onFile} />
-                </label>
-              </>
-            ) : stage === "ready" ? (
-              <button
-                onClick={() => (modelState === "error" ? ensureModel() : startRecording())}
-                disabled={modelState === "loading"}
-                className="btn btn-primary py-3 col-span-2 disabled:opacity-50"
-              >
-                {modelState === "ready"
-                  ? "⏺ スイングを解析（3秒後に5秒間撮影）"
-                  : modelState === "error"
-                    ? "↻ AIエンジンを再読み込み"
-                    : "AI解析エンジンを準備中…"}
+          {stage === "idle" || stage === "loading" ? (
+            <div className="grid grid-cols-2 gap-2 mt-3">
+              <button onClick={() => startCamera()} className="btn btn-primary py-3">
+                📷 カメラで撮影
               </button>
-            ) : (
-              <div className="col-span-2 text-center text-sm py-3" style={{ color: "var(--muted)" }}>
-                {stage === "prep"
-                  ? "構えてください…"
-                  : stage === "recording"
-                    ? "スイングしてください…"
-                    : "解析中…"}
-              </div>
-            )}
-          </div>
+              <label className="btn btn-ghost py-3 text-center cursor-pointer">
+                🎞 動画を選択
+                <input type="file" accept="video/*" className="hidden" onChange={onFile} />
+              </label>
+            </div>
+          ) : stage === "ready" ? (
+            <div className="mt-3 space-y-2">
+              {modelState === "error" ? (
+                <button onClick={() => ensureModel()} className="btn btn-primary py-3 w-full">
+                  ↻ AIエンジンを再読み込み
+                </button>
+              ) : modelState !== "ready" ? (
+                <div className="text-center text-sm py-3" style={{ color: "var(--muted)" }}>
+                  AI解析エンジンを準備中…
+                </div>
+              ) : (
+                <>
+                  <div
+                    className="card px-3 py-2.5 flex items-center justify-between"
+                  >
+                    <div>
+                      <div className="text-sm font-semibold">自動スイング検出</div>
+                      <div className="text-[11px]" style={{ color: "var(--muted)" }}>
+                        時間制限なし。構えてからゆっくり打ってOK
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setAutoDetect((v) => !v)}
+                      className="btn px-3 py-1.5 text-xs"
+                      style={{
+                        background: autoDetect ? "var(--green)" : "var(--bg-soft)",
+                        color: autoDetect ? "#03260f" : "var(--fg)",
+                        border: "1px solid var(--line)",
+                      }}
+                    >
+                      {autoDetect ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                  <button onClick={manualAnalyze} className="btn btn-ghost py-3 w-full">
+                    ⏱ 今のスイングを解析（手動）
+                  </button>
+                </>
+              )}
+            </div>
+          ) : null}
         </div>
 
         {/* Result */}
@@ -423,8 +556,11 @@ export default function SwingPage() {
             saved={saved}
             onSave={save}
             onRetry={() => {
-              setStage("ready");
+              resetDetector();
+              setWatch("待機中（自動検出ON）");
+              stageRef.current = "ready";
               setResult(null);
+              setStage("ready");
             }}
           />
         )}
@@ -541,6 +677,44 @@ function Results({
           </div>
         )}
       </Card>
+
+      {/* ① リバース・エンジニアリング（巻き戻し）診断 */}
+      {result.rootCause.length > 1 && (
+        <Card>
+          <div className="text-xs mb-1" style={{ color: "var(--muted)" }}>
+            🔎 リバース・エンジニアリング診断（根本原因の巻き戻し）
+          </div>
+          <p className="text-[11px] mb-3" style={{ color: "var(--muted)" }}>
+            結果から時間を遡り、悪癖の引き金になった最初の動きを特定します。
+          </p>
+          <div className="space-y-0">
+            {result.rootCause.map((s, i) => (
+              <div key={i} className="flex gap-3">
+                <div className="flex flex-col items-center">
+                  <div
+                    className="w-3 h-3 rounded-full mt-1"
+                    style={{ background: i === result.rootCause.length - 1 ? "var(--red)" : "var(--cyan)" }}
+                  />
+                  {i < result.rootCause.length - 1 && (
+                    <div className="w-0.5 flex-1 my-1" style={{ background: "var(--line)" }} />
+                  )}
+                </div>
+                <div className="pb-3">
+                  <div className="text-[11px]" style={{ color: "var(--muted)" }}>
+                    {s.phase}
+                    {s.tMs !== 0 && `（インパクト${s.tMs}ms）`}
+                    {i === result.rootCause.length - 1 && " ← 根本原因"}
+                  </div>
+                  <div className="text-sm font-semibold">{s.label}</div>
+                  <div className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>
+                    {s.detail}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <div className="grid grid-cols-2 gap-2">
         <button onClick={onRetry} className="btn btn-ghost py-3">

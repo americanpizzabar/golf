@@ -38,6 +38,7 @@ export interface FrameMetrics {
   hipLine: number;
   leadArmAngle: number; // shoulder-elbow-wrist
   leadArm: { sh: V; el: V; wr: V };
+  trailKneeAngle: number; // hip-knee-ankle of the trail leg (≈180 = straight)
   ok: boolean;
 }
 
@@ -45,6 +46,10 @@ export function frameMetrics(lm: Frame, leftHanded = false): FrameMetrics {
   const lead = leftHanded
     ? { sh: LM.rShoulder, el: LM.rElbow, wr: LM.rWrist, hip: LM.rHip }
     : { sh: LM.lShoulder, el: LM.lElbow, wr: LM.lWrist, hip: LM.lHip };
+  // Trail leg is the opposite side (right knee for a right-handed golfer).
+  const trail = leftHanded
+    ? { hip: LM.lHip, knee: LM.lKnee, ankle: LM.lAnkle }
+    : { hip: LM.rHip, knee: LM.rKnee, ankle: LM.rAnkle };
 
   const lSh = v(lm[LM.lShoulder]);
   const rSh = v(lm[LM.rShoulder]);
@@ -75,6 +80,7 @@ export function frameMetrics(lm: Frame, leftHanded = false): FrameMetrics {
     hipLine: lineAngle(lHip, rHip),
     leadArmAngle: jointAngle(sh, el, wr),
     leadArm: { sh, el, wr },
+    trailKneeAngle: jointAngle(v(lm[trail.hip]), v(lm[trail.knee]), v(lm[trail.ankle])),
     ok,
   };
 }
@@ -87,6 +93,14 @@ function turnDeg(current: number, reference: number): number {
   return Math.round((Math.acos(ratio) * 180) / Math.PI);
 }
 
+// One link in the "ドミノ倒し" causal chain (effect ← cause ← root cause).
+export interface RootCauseStep {
+  phase: string; // フェーズ名
+  tMs: number; // インパクトを0msとした相対時刻（負=前）
+  label: string; // 起きている事象
+  detail: string; // 補足
+}
+
 export interface SwingResult {
   angles: SwingAngles;
   shoulderTurn: number;
@@ -96,6 +110,8 @@ export interface SwingResult {
   tempoRatio: number;
   swayCm: number;
   leadArmImpact: number; // for chicken wing (lead arm angle at impact)
+  earlyExtensionDeg: number; // 起き上がり量（アドレス比、+で起き上がり）
+  rootCause: RootCauseStep[]; // リバース・エンジニアリング診断
   phaseIdx: { address: number; top: number; impact: number; finish: number };
   valid: boolean;
 }
@@ -103,8 +119,9 @@ export interface SwingResult {
 // Analyze a sequence of pose frames into golf swing metrics.
 export function analyzeSwing(
   frames: Frame[],
-  opts: { heightCm?: number; leftHanded?: boolean } = {},
+  opts: { heightCm?: number; leftHanded?: boolean; fps?: number } = {},
 ): SwingResult {
+  const fps = opts.fps && opts.fps > 0 ? opts.fps : 30;
   const fm = frames.map((f) => frameMetrics(f, opts.leftHanded));
   const good = fm.filter((m) => m.ok);
   const valid = good.length >= 5 && frames.length >= 6;
@@ -123,6 +140,8 @@ export function analyzeSwing(
       tempoRatio: 0,
       swayCm: 0,
       leadArmImpact: 0,
+      earlyExtensionDeg: 0,
+      rootCause: [],
       phaseIdx: { address: 0, top: 0, impact: 0, finish: 0 },
       valid: false,
     };
@@ -192,6 +211,55 @@ export function analyzeSwing(
   // The follow-through naturally folds the arm, so it must NOT be averaged in.
   const leadArmImpact = Math.round(fm[impactIdx].leadArmAngle);
 
+  // ① リバース・エンジニアリング診断（ドミノ倒し）
+  // 「結果（インパクトでの起き上がり）」から時間を巻き戻して根本原因を辿る。
+  const dtMs = 1000 / fps;
+  const tFromImpact = (i: number) => Math.round((i - impactIdx) * dtMs);
+  const earlyExtensionDeg = Math.round(
+    angles.address.spineTilt - angles.impact.spineTilt,
+  ); // +なら前傾が起きた（起き上がり）
+
+  const rootCause: RootCauseStep[] = [];
+  if (earlyExtensionDeg >= 6) {
+    rootCause.push({
+      phase: "インパクト",
+      tMs: 0,
+      label: `前傾角が${earlyExtensionDeg}°起き上がっています`,
+      detail: "ボールとの距離が変わり、ダフリ・トップやプッシュの原因に。",
+    });
+    // 原因候補1: ダウン始動での腰の横スライド（トップ→インパクト間の最大横移動）
+    let dsSwayIdx = topIdx;
+    let dsSway = 0;
+    for (let i = topIdx; i <= impactIdx; i++) {
+      const s = Math.abs(fm[i].midHipX - fm[topIdx].midHipX);
+      if (s > dsSway) {
+        dsSway = s;
+        dsSwayIdx = i;
+      }
+    }
+    const dsSwayCm = Math.round((dsSway / bodyPx) * (opts.heightCm ?? 170));
+    if (dsSwayCm >= 4) {
+      rootCause.push({
+        phase: "ダウンスイング始動",
+        tMs: tFromImpact(dsSwayIdx),
+        label: `腰が約${dsSwayCm}cm横にスライド`,
+        detail: "切り返しで腰が突っ込み、体が伸び上がる引き金に。回転で下ろす意識を。",
+      });
+    }
+    // 原因候補2: トップでの右（トレール）膝の伸び
+    const kneeTop = fm[topIdx].trailKneeAngle;
+    const kneeAddr = avg(addrWin.map((m) => m.trailKneeAngle));
+    const kneeExt = Math.round(kneeTop - kneeAddr);
+    if (kneeExt >= 8) {
+      rootCause.push({
+        phase: "トップ",
+        tMs: tFromImpact(topIdx),
+        label: `右膝が${kneeExt}°伸びています`,
+        detail: "トップで右膝が伸びると軸が高くなり、ダウンでの起き上がりを誘発します。",
+      });
+    }
+  }
+
   return {
     angles,
     shoulderTurn: angles.top.shoulderTurn,
@@ -201,6 +269,8 @@ export function analyzeSwing(
     tempoRatio,
     swayCm,
     leadArmImpact,
+    earlyExtensionDeg,
+    rootCause,
     phaseIdx: {
       address: addressIdx,
       top: topIdx,

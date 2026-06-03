@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { PageHeader, Card } from "@/components/ui";
 import { generateMenu, youtubeSearch, LIE_LABELS, LIE_ORDER } from "@/lib/golf";
-import { fetchSwings, fetchApproaches, saveMenu } from "@/lib/db";
+import { fetchSwings, fetchApproaches, saveMenu, fetchMenus } from "@/lib/db";
 import type { Drill, Fault, LieType } from "@/lib/types";
 
 export default function CoachPage() {
@@ -17,12 +17,25 @@ export default function CoachPage() {
   const [focus, setFocus] = useState<string[]>([]);
   const [saved, setSaved] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [recentIds, setRecentIds] = useState<string[]>([]);
 
   useEffect(() => {
     (async () => {
-      const [swings, approaches] = await Promise.all([fetchSwings(5), fetchApproaches(300)]);
+      const [swings, approaches, menus] = await Promise.all([
+        fetchSwings(5),
+        fetchApproaches(300),
+        fetchMenus(20),
+      ]);
       const latestFaults = swings[0]?.faults ?? [];
       setFaults(latestFaults);
+      // Drill ids proposed in the last 3 days → de-prioritize for freshness.
+      const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
+      const recent = new Set<string>();
+      for (const m of menus) {
+        if (new Date(m.created_at).getTime() < cutoff) continue;
+        for (const d of m.drills ?? []) if (d.id) recent.add(d.id);
+      }
+      setRecentIds([...recent]);
       // weak lies = success rate < 50% with >=3 attempts
       const weak: LieType[] = [];
       for (const l of LIE_ORDER) {
@@ -43,6 +56,7 @@ export default function CoachPage() {
       mode,
       faults,
       weakLies,
+      recentIds,
     });
     setMenu(drills);
     setFocus(focus);

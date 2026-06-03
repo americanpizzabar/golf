@@ -77,6 +77,14 @@ export type LieType =
   | "rough"
   | "bunker";
 
+// One shot's landing point relative to the pin, in meters.
+// dx: +right / -left, dy: +long(奥) / -short(手前).
+export interface Shot {
+  dx: number;
+  dy: number;
+  zone: "holed" | "in1" | "in2" | "out";
+}
+
 export interface ApproachSession {
   id: string;
   device_id: string;
@@ -87,9 +95,12 @@ export interface ApproachSession {
   in_1m: number;
   in_2m: number;
   holed: number;
+  shots: Shot[];
 }
 
 export interface Drill {
+  id: string; // unique identifier (for dedupe / recency)
+  cat: string; // category for "max 1 per category per session"
   title: string;
   minutes: number;
   balls?: number;

@@ -172,6 +172,13 @@ export default function Home() {
             desc="鏡の前・1畳でできるメニュー"
             accent="#06b6d4"
           />
+          <LinkCard
+            href="/conditions"
+            icon="🌬️"
+            title="弾道エミュレーター"
+            desc="標高・気温・風で飛距離変化を予測"
+            accent="#0ea5e9"
+          />
         </div>
 
         <p
