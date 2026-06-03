@@ -14,11 +14,13 @@ import {
 import { PageHeader, Card, Spinner } from "@/components/ui";
 import { drawSkeleton, LM, type Frame } from "@/lib/pose";
 import { expandFrame, wristSpeedSeries } from "@/lib/swing";
-import { fetchSwings, getProfile } from "@/lib/db";
-import type { Swing } from "@/lib/types";
+import { generateModelSwing } from "@/lib/model-swing";
+import { fetchSwings, getProfile, fetchPros } from "@/lib/db";
+import type { Swing, Pro } from "@/lib/types";
 
 export default function GhostPage() {
-  const [swings, setSwings] = useState<Swing[]>([]);
+  const [swings, setSwings] = useState<Swing[]>([]); // real swings (A choices)
+  const [model, setModel] = useState<Swing | null>(null); // synthetic pro model
   const [leftHanded, setLeftHanded] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [aId, setAId] = useState("");
@@ -26,21 +28,40 @@ export default function GhostPage() {
 
   useEffect(() => {
     (async () => {
-      const [sw, p] = await Promise.all([fetchSwings(60), getProfile()]);
-      setLeftHanded(p?.dominant_hand === "left");
+      const [sw, p, pros] = await Promise.all([fetchSwings(60), getProfile(), fetchPros()]);
+      const lh = p?.dominant_hand === "left";
+      setLeftHanded(lh);
       const withFrames = sw.filter((s) => s.pose_frames && s.pose_frames.length > 4);
       setSwings(withFrames);
-      if (withFrames.length) {
-        setAId(withFrames[0].id); // latest
-        const best = [...withFrames].sort((x, y) => (y.sync_rate ?? 0) - (x.sync_rate ?? 0))[0];
-        setBId(best.id !== withFrames[0].id ? best.id : (withFrames[1]?.id ?? best.id));
+      // Build an idealized "model" ghost from a reference pro so a comparison is
+      // possible even with a single recorded swing. The model is right-handed;
+      // mirror it for left-handed players so it overlaps the user's swing.
+      const pro: Pro | undefined = pros.find((x) => x.name.includes("マキロイ")) ?? pros[0];
+      if (pro) {
+        let mf = generateModelSwing(pro);
+        if (lh) mf = mf.map((f) => f.map((v, i) => (i % 2 === 0 ? 1 - v : v)));
+        setModel({
+          id: "model",
+          device_id: "",
+          created_at: new Date().toISOString(),
+          score: null,
+          sync_rate: null,
+          faults: [],
+          angles: {},
+          thumbnail: null,
+          note: null,
+          pose_frames: mf,
+        } as unknown as Swing);
       }
+      if (withFrames.length) setAId(withFrames[0].id);
+      setBId("model");
       setLoaded(true);
     })();
   }, []);
 
+  const ghostChoices = [...(model ? [model] : []), ...swings];
   const a = swings.find((s) => s.id === aId);
-  const b = swings.find((s) => s.id === bId);
+  const b = ghostChoices.find((s) => s.id === bId);
 
   return (
     <main>
@@ -48,11 +69,11 @@ export default function GhostPage() {
       <div className="px-4 space-y-4">
         {!loaded ? (
           <Card className="text-center py-8"><Spinner label="読み込み中…" /></Card>
-        ) : swings.length < 2 ? (
+        ) : swings.length < 1 ? (
           <Card className="text-center py-10 text-sm" style={{ color: "var(--muted)" }}>
-            比較には保存済みスイングが2つ以上必要です。<br />
+            比較には保存済みスイングが必要です。<br />
             <Link href="/swing" style={{ color: "var(--green)" }}>スイング解析</Link>
-            を数回保存してください。
+            を保存すると、お手本モデルと重ねて比較できます。
           </Card>
         ) : (
           <>
@@ -69,7 +90,7 @@ export default function GhostPage() {
                 <label className="block">
                   <span className="text-xs" style={{ color: "var(--amber)" }}>● ゴースト（橙）</span>
                   <select value={bId} onChange={(e) => setBId(e.target.value)} className="w-full px-2 py-2 mt-1 text-sm">
-                    {swings.map((s) => (
+                    {ghostChoices.map((s) => (
                       <option key={s.id} value={s.id}>{label(s)}</option>
                     ))}
                   </select>
@@ -91,6 +112,7 @@ export default function GhostPage() {
 }
 
 function label(s: Swing) {
+  if (s.id === "model") return "🏌 お手本モデル（理想スイング）";
   const d = new Date(s.created_at).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
   return `${d}・${s.sync_rate ?? "—"}%${s.head_speed ? `・${s.head_speed}m/s` : ""}`;
 }
