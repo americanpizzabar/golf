@@ -71,6 +71,7 @@ export interface Swing {
   hand_speed?: number | null;
   efficiency?: number | null;
   apex_m?: number | null;
+  pose_frames?: number[][] | null; // compact [x0,y0,...] per downsampled frame
 }
 
 export type BallShape = "straight" | "draw" | "fade" | "slice" | "hook";

@@ -325,6 +325,49 @@ function avg(arr: number[]) {
   return arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : 0;
 }
 
+// Downsample a swing's frames to a compact flat-array sequence for storage
+// (ghost overlay / replay). Keeps x,y for all 33 landmarks.
+export function compactFrames(frames: Frame[], max = 30): number[][] {
+  if (!frames.length) return [];
+  const n = Math.min(max, frames.length);
+  const out: number[][] = [];
+  for (let k = 0; k < n; k++) {
+    const idx = Math.round((k / (n - 1 || 1)) * (frames.length - 1));
+    const f = frames[idx];
+    const flat: number[] = [];
+    for (let i = 0; i < 33; i++) {
+      const p = f[i];
+      flat.push(Math.round((p?.x ?? 0) * 1000) / 1000, Math.round((p?.y ?? 0) * 1000) / 1000);
+    }
+    out.push(flat);
+  }
+  return out;
+}
+
+// Expand a compact frame back into a drawable Frame (z/visibility filled).
+export function expandFrame(flat: number[]): Frame {
+  const f: Frame = [];
+  for (let i = 0; i < 33; i++) {
+    f.push({ x: flat[i * 2] ?? 0, y: flat[i * 2 + 1] ?? 0, z: 0, visibility: 1 });
+  }
+  return f;
+}
+
+// Lead-wrist speed (relative) across a compact sequence, normalized in time —
+// used to visualize the "acceleration process" in the ghost comparison.
+export function wristSpeedSeries(frames: number[][], leftHanded = false): number[] {
+  const wr = leftHanded ? LM.rWrist : LM.lWrist;
+  const out: number[] = [];
+  for (let i = 1; i < frames.length; i++) {
+    const ax = frames[i][wr * 2];
+    const ay = frames[i][wr * 2 + 1];
+    const bx = frames[i - 1][wr * 2];
+    const by = frames[i - 1][wr * 2 + 1];
+    out.push(Math.hypot(ax - bx, ay - by));
+  }
+  return out;
+}
+
 // Pick the pro whose body proportions best match the user.
 export function matchPro(
   pros: Pro[],

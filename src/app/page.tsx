@@ -166,6 +166,13 @@ export default function Home() {
             accent="#8b5cf6"
           />
           <LinkCard
+            href="/ghost"
+            icon="👻"
+            title="ゴースト比較"
+            desc="ベストスイングと重ねて加速を可視化"
+            accent="#a78bfa"
+          />
+          <LinkCard
             href="/match"
             icon="🤝"
             title="一期一会ラウンド（対戦）"

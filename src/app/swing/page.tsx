@@ -5,7 +5,7 @@ import Link from "next/link";
 import { PageHeader, Card, Spinner, SeverityBadge } from "@/components/ui";
 import PhaseFigure from "@/components/PhaseFigure";
 import { getPoseLandmarker, drawSkeleton, type Frame } from "@/lib/pose";
-import { analyzeSwing, detectFaults, matchPro, syncRate, type SwingResult } from "@/lib/swing";
+import { analyzeSwing, detectFaults, matchPro, syncRate, compactFrames, type SwingResult } from "@/lib/swing";
 import { CLUBS, clubFactor } from "@/lib/golf";
 import { fetchPros, getProfile, saveSwing } from "@/lib/db";
 import type { Pro, Profile, Fault, SwingAngles } from "@/lib/types";
@@ -51,6 +51,7 @@ export default function SwingPage() {
   const analyzingRef = useRef(false);
   const stageRef = useRef<Stage>("idle");
   const autoRef = useRef(true);
+  const lastFramesRef = useRef<Frame[]>([]);
 
   const [stage, setStage] = useState<Stage>("idle");
   const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -513,6 +514,7 @@ export default function SwingPage() {
   function finishAnalysis(frames: Frame[], fps: number, backStage: Stage = "ready") {
     analyzingRef.current = true;
     stageRef.current = "analyzing";
+    lastFramesRef.current = frames;
     setStage("analyzing");
     try {
       const detected = frames.length;
@@ -577,6 +579,7 @@ export default function SwingPage() {
       hand_speed: result.handSpeed,
       efficiency: result.efficiency,
       apex_m: null,
+      pose_frames: compactFrames(lastFramesRef.current),
     });
     setSaved(true);
   }
