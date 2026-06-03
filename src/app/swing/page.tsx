@@ -70,6 +70,15 @@ export default function SwingPage() {
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
   const [scanPct, setScanPct] = useState(0);
+  // Pinch/slider zoom for the uploaded clip preview. `pan` is the crop top-left
+  // (normalized); `uploadAspect` matches the container to the video so the
+  // zoom transform and the analysis crop share the same coordinates.
+  const [uZoom, setUZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [uploadAspect, setUploadAspect] = useState<string | null>(null);
+  const pinchRef = useRef<{ dist: number; zoom: number } | null>(null);
+  const dragRef = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+  const cropCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [pros, setPros] = useState<Pro[]>([]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [pro, setPro] = useState<Pro | null>(null);
@@ -269,6 +278,10 @@ export default function SwingPage() {
     // Stop any existing stream first (needed when switching cameras / lenses).
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    // Leaving upload mode → drop the clip's zoom/aspect so the live view is normal.
+    setUploadAspect(null);
+    setUZoom(1);
+    setPan({ x: 0, y: 0 });
     setStage("loading");
     const videoConstraint: MediaTrackConstraints = opts?.deviceId
       ? { deviceId: { exact: opts.deviceId }, width: { ideal: 1280 } }
@@ -412,6 +425,9 @@ export default function SwingPage() {
       setUploadDur(dur);
       setTrimStart(0);
       setTrimEnd(dur);
+      setUploadAspect(video.videoWidth && video.videoHeight ? `${video.videoWidth}/${video.videoHeight}` : "3/4");
+      setUZoom(1);
+      setPan({ x: 0, y: 0 });
       try {
         video.pause();
         video.currentTime = 0;
@@ -425,6 +441,61 @@ export default function SwingPage() {
       console.error(e);
     }
   }
+
+  // --- Upload preview zoom / pan -------------------------------------------
+  const isUpload = uploadAspect !== null;
+  function clampPan(p: { x: number; y: number }, z: number) {
+    const m = Math.max(0, 1 - 1 / z);
+    return { x: Math.min(Math.max(p.x, 0), m), y: Math.min(Math.max(p.y, 0), m) };
+  }
+  function applyUZoom(z: number, focus?: { x: number; y: number }) {
+    const nz = Math.min(5, Math.max(1, z));
+    setUZoom(nz);
+    // Keep the current view centre (or `focus`) under the same screen point.
+    setPan((p) => {
+      const f = focus ?? { x: p.x + 1 / uZoom / 2, y: p.y + 1 / uZoom / 2 };
+      return clampPan({ x: f.x - 1 / nz / 2, y: f.y - 1 / nz / 2 }, nz);
+    });
+  }
+  function resetZoom() {
+    setUZoom(1);
+    setPan({ x: 0, y: 0 });
+  }
+  function onPreviewTouchStart(e: React.TouchEvent) {
+    if (!isUpload) return;
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      pinchRef.current = { dist: Math.hypot(dx, dy) || 1, zoom: uZoom };
+      dragRef.current = null;
+    } else if (e.touches.length === 1 && uZoom > 1) {
+      dragRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, px: pan.x, py: pan.y };
+    }
+  }
+  function onPreviewTouchMove(e: React.TouchEvent) {
+    if (!isUpload) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (e.touches.length === 2 && pinchRef.current) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.hypot(dx, dy) || 1;
+      applyUZoom(pinchRef.current.zoom * (d / pinchRef.current.dist));
+    } else if (e.touches.length === 1 && dragRef.current) {
+      const ddx = (e.touches[0].clientX - dragRef.current.x) / rect.width;
+      const ddy = (e.touches[0].clientY - dragRef.current.y) / rect.height;
+      setPan(clampPan({ x: dragRef.current.px - ddx / uZoom, y: dragRef.current.py - ddy / uZoom }, uZoom));
+    }
+  }
+  function onPreviewTouchEnd(e: React.TouchEvent) {
+    if (e.touches.length === 0) {
+      pinchRef.current = null;
+      dragRef.current = null;
+    }
+  }
+  // CSS transform that crops the preview to the current zoom/pan (origin centre).
+  const cropCx = pan.x + 1 / uZoom / 2;
+  const cropCy = pan.y + 1 / uZoom / 2;
+  const zoomTransform = `scale(${uZoom}) translate(${(0.5 - cropCx) * 100}%, ${(0.5 - cropCy) * 100}%)`;
 
   // Seek the upload preview to a time (used when dragging the trim handles).
   function seekPreview(t: number) {
@@ -460,6 +531,34 @@ export default function SwingPage() {
     setStage("analyzing");
     setNotice("");
     setScanPct(0);
+
+    // When zoomed, detect on the cropped+upscaled region (helps small/distant
+    // subjects), then map landmarks back to full-frame coords so the rest of the
+    // pipeline and the overlay (which is also zoom-transformed) stay consistent.
+    const z = uZoom;
+    const px = pan.x;
+    const py = pan.y;
+    const cropSource = (): HTMLVideoElement | HTMLCanvasElement => {
+      if (z <= 1) return video;
+      let cc = cropCanvasRef.current;
+      if (!cc) {
+        cc = document.createElement("canvas");
+        cropCanvasRef.current = cc;
+      }
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (cc.width !== vw) {
+        cc.width = vw;
+        cc.height = vh;
+      }
+      const cx = cc.getContext("2d");
+      if (cx) cx.drawImage(video, px * vw, py * vh, vw / z, vh / z, 0, 0, vw, vh);
+      return cc;
+    };
+    const mapPose = (pose: Frame): Frame =>
+      z <= 1
+        ? pose
+        : pose.map((p) => ({ ...p, x: px + p.x / z, y: py + p.y / z }));
 
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d") ?? null;
@@ -521,9 +620,10 @@ export default function SwingPage() {
           try {
             const ts = Math.max(performance.now(), lastTsRef.current + 1);
             lastTsRef.current = ts;
-            const res = model.detectForVideo(video, ts);
-            const pose = res.landmarks?.[0] as Frame | undefined;
-            if (pose) {
+            const res = model.detectForVideo(cropSource(), ts);
+            const raw = res.landmarks?.[0] as Frame | undefined;
+            if (raw) {
+              const pose = mapPose(raw);
               frames.push(pose);
               draw(pose);
             }
@@ -663,19 +763,25 @@ export default function SwingPage() {
         {/* Camera / video stage */}
         <div className={showCamera ? "block" : "hidden"}>
           <Card className="p-0 overflow-hidden">
-            <div className="relative bg-black aspect-[3/4]">
+            <div
+              className={`relative bg-black overflow-hidden ${isUpload && uploadAspect ? "" : "aspect-[3/4]"}`}
+              style={isUpload && uploadAspect ? { aspectRatio: uploadAspect, touchAction: "none" } : undefined}
+              onTouchStart={onPreviewTouchStart}
+              onTouchMove={onPreviewTouchMove}
+              onTouchEnd={onPreviewTouchEnd}
+            >
               <video
                 ref={videoRef}
                 playsInline
                 autoPlay
                 muted
                 className="absolute inset-0 w-full h-full object-contain"
-                style={{ transform: cameraTransform }}
+                style={{ transform: isUpload ? zoomTransform : cameraTransform }}
               />
               <canvas
                 ref={canvasRef}
                 className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-                style={{ transform: cameraTransform }}
+                style={{ transform: isUpload ? zoomTransform : cameraTransform }}
               />
               {stage === "ready" && (
                 <button
@@ -737,6 +843,47 @@ export default function SwingPage() {
           {/* Video trim: choose exactly the swing portion */}
           {stage === "trim" && (
             <div className="mt-3 space-y-3">
+              <Card>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs" style={{ color: "var(--muted)" }}>
+                    拡大・縮小（ピンチ操作も可）— 被写体が小さいときに寄せると精度が上がります
+                  </div>
+                  <button onClick={resetZoom} className="text-[11px] underline" style={{ color: "var(--green)" }}>
+                    リセット
+                  </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => applyUZoom(uZoom - 0.5)}
+                    className="btn btn-ghost w-9 h-9 grid place-items-center text-lg leading-none"
+                  >
+                    −
+                  </button>
+                  <input
+                    type="range"
+                    min={1}
+                    max={5}
+                    step={0.1}
+                    value={uZoom}
+                    onChange={(e) => applyUZoom(Number(e.target.value))}
+                    className="flex-1"
+                  />
+                  <button
+                    onClick={() => applyUZoom(uZoom + 0.5)}
+                    className="btn btn-ghost w-9 h-9 grid place-items-center text-lg leading-none"
+                  >
+                    ＋
+                  </button>
+                  <span className="text-[11px] w-10 text-right tabular-nums" style={{ color: "var(--muted)" }}>
+                    {uZoom.toFixed(1)}×
+                  </span>
+                </div>
+                {uZoom > 1 && (
+                  <div className="text-[11px] mt-1.5" style={{ color: "var(--muted)" }}>
+                    1本指ドラッグで表示位置を移動できます。この拡大範囲がそのまま解析されます。
+                  </div>
+                )}
+              </Card>
               <Card>
                 <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
                   解析するスイングの範囲を指定（不要な素振り・歩行を除外すると精度が上がります）
