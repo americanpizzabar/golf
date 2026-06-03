@@ -28,6 +28,96 @@ interface Pt {
   y: number;
 }
 
+interface Blob {
+  x: number; // normalized centroid
+  y: number;
+  size: number;
+  score: number;
+  moved: boolean;
+}
+
+// Find golf-ball-like blobs: small, bright-WHITE (low saturation), roundish.
+// requireMotion=true also requires the region to have changed since prev frame
+// (the ball in flight); false also returns the resting ball at address.
+function findBallBlobs(
+  cur: Uint8ClampedArray,
+  prev: Uint8ClampedArray,
+  w: number,
+  h: number,
+  requireMotion: boolean,
+): Blob[] {
+  const n = w * h;
+  const mask = new Uint8Array(n); // 1 = white candidate, 2 = white & moved
+  for (let p = 0, i = 0; p < n; p++, i += 4) {
+    const r = cur[i];
+    const g = cur[i + 1];
+    const b = cur[i + 2];
+    const mn = Math.min(r, g, b);
+    const mx = Math.max(r, g, b);
+    const white = mn > 140 && mx - mn < 55; // bright + low saturation
+    if (!white) continue;
+    const moved =
+      Math.abs(r - prev[i]) + Math.abs(g - prev[i + 1]) + Math.abs(b - prev[i + 2]) > 55;
+    if (requireMotion && !moved) continue;
+    mask[p] = moved ? 2 : 1;
+  }
+
+  const BALL_MIN = 2;
+  const BALL_MAX = requireMotion ? 260 : 110; // flight streaks can be larger
+  const minFill = requireMotion ? 0.25 : 0.42;
+  const blobs: Blob[] = [];
+  const stack = new Int32Array(n);
+  const seen = new Uint8Array(n);
+  for (let start = 0; start < n; start++) {
+    if (!mask[start] || seen[start]) continue;
+    let sp = 0;
+    stack[sp++] = start;
+    seen[start] = 1;
+    let count = 0;
+    let movedCnt = 0;
+    let sumX = 0;
+    let sumY = 0;
+    let minX = w;
+    let maxX = 0;
+    let minY = h;
+    let maxY = 0;
+    while (sp > 0) {
+      const p = stack[--sp];
+      const px = p % w;
+      const py = (p / w) | 0;
+      count++;
+      if (mask[p] === 2) movedCnt++;
+      sumX += px;
+      sumY += py;
+      if (px < minX) minX = px;
+      if (px > maxX) maxX = px;
+      if (py < minY) minY = py;
+      if (py > maxY) maxY = py;
+      if (px > 0 && mask[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack[sp++] = p - 1; }
+      if (px < w - 1 && mask[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack[sp++] = p + 1; }
+      if (py > 0 && mask[p - w] && !seen[p - w]) { seen[p - w] = 1; stack[sp++] = p - w; }
+      if (py < h - 1 && mask[p + w] && !seen[p + w]) { seen[p + w] = 1; stack[sp++] = p + w; }
+    }
+    if (count < BALL_MIN || count > BALL_MAX) continue;
+    const bw = maxX - minX + 1;
+    const bh = maxY - minY + 1;
+    const aspect = bw / bh;
+    if (aspect < 0.33 || aspect > 3) continue;
+    const fill = count / (bw * bh);
+    if (fill < minFill) continue;
+    blobs.push({
+      x: sumX / count / w,
+      y: sumY / count / h,
+      size: count,
+      // Prefer round & compact, lightly penalize larger blobs.
+      score: fill - count / (BALL_MAX * 2),
+      moved: movedCnt / count > 0.5,
+    });
+  }
+  blobs.sort((a, b) => b.score - a.score);
+  return blobs;
+}
+
 export default function TracerPage() {
   const [tab, setTab] = useState<"trace" | "matrix">("trace");
   const [shots, setShots] = useState<BallShot[]>([]);
@@ -69,11 +159,15 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const diffRef = useRef<HTMLCanvasElement | null>(null);
   const prevRef = useRef<Uint8ClampedArray | null>(null);
   const rafRef = useRef(0);
-  const armedRef = useRef(false);
   const activeRef = useRef(false);
   const ptsRef = useRef<Pt[]>([]);
+  const velRef = useRef<Pt>({ x: 0, y: 0 });
+  const restRef = useRef<Pt | null>(null); // resting (address) ball position
+  const lastMovingRef = useRef<Pt | null>(null);
   const lastSeenRef = useRef(0);
   const startMsRef = useRef(0);
+  const ballReadyRef = useRef(false);
+  const [ballReady, setBallReady] = useState(false);
 
   const [camOn, setCamOn] = useState(false);
   const [club, setClub] = useState("DR");
@@ -129,11 +223,15 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     }
     if (!diffRef.current) {
       const c = document.createElement("canvas");
-      c.width = 128;
-      c.height = 96;
+      c.width = 160;
+      c.height = 120;
       diffRef.current = c;
     }
     prevRef.current = null;
+    activeRef.current = false;
+    ptsRef.current = [];
+    restRef.current = null;
+    lastMovingRef.current = null;
     setResult(null);
     setCamOn(true);
     rafRef.current = requestAnimationFrame(loop);
@@ -143,6 +241,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     cancelAnimationFrame(rafRef.current);
+    setReady(false);
     setCamOn(false);
   }
 
@@ -171,55 +270,88 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     rafRef.current = requestAnimationFrame(loop);
   }
 
+  function setReady(v: boolean) {
+    if (ballReadyRef.current !== v) {
+      ballReadyRef.current = v;
+      setBallReady(v);
+    }
+  }
+
   function detectStep(cur: Uint8ClampedArray, prev: Uint8ClampedArray, w: number, h: number, now: number) {
-    let sx = 0;
-    let sy = 0;
-    let cnt = 0;
-    // Weight toward bright (the ball) moving pixels.
-    for (let i = 0; i < cur.length; i += 4) {
-      const d = Math.abs(cur[i] - prev[i]) + Math.abs(cur[i + 1] - prev[i + 1]) + Math.abs(cur[i + 2] - prev[i + 2]);
-      const bright = cur[i] + cur[i + 1] + cur[i + 2];
-      if (d > 70 && bright > 360) {
-        const px = (i / 4) % w;
-        const py = Math.floor(i / 4 / w);
-        sx += px;
-        sy += py;
-        cnt++;
-      }
-    }
-    const motion = cnt;
-    if (motion >= 2 && motion < 400) {
-      const cx = sx / cnt / w;
-      const cy = sy / cnt / h;
-      if (!activeRef.current) {
-        // start a shot only after a quiet/armed period
-        if (armedRef.current) {
-          activeRef.current = true;
-          ptsRef.current = [{ x: cx, y: cy }];
-          startMsRef.current = now;
-        }
-      } else {
-        const last = ptsRef.current[ptsRef.current.length - 1];
-        if (!last || Math.hypot(cx - last.x, cy - last.y) > 0.01) {
-          ptsRef.current.push({ x: cx, y: cy });
+    // Only the golf ball: small, bright-WHITE (low saturation), roundish blobs.
+    const moving = findBallBlobs(cur, prev, w, h, true); // white + just moved
+    const still = findBallBlobs(cur, prev, w, h, false); // white (incl. at rest)
+
+    if (activeRef.current) {
+      // Track the ball: pick the moving white blob nearest the predicted spot.
+      const last = ptsRef.current[ptsRef.current.length - 1];
+      const pred = { x: last.x + velRef.current.x, y: last.y + velRef.current.y };
+      let best: Blob | null = null;
+      let bd = 0.32; // search gate (normalized)
+      for (const b of moving) {
+        const d = Math.hypot(b.x - pred.x, b.y - pred.y);
+        if (d < bd) {
+          bd = d;
+          best = b;
         }
       }
-      lastSeenRef.current = now;
-      armedRef.current = true;
-    } else if (motion < 2) {
-      armedRef.current = true; // quiet → armed
-      if (activeRef.current && now - lastSeenRef.current > 250) {
-        finalize();
+      if (best) {
+        velRef.current = { x: best.x - last.x, y: best.y - last.y };
+        ptsRef.current.push({ x: best.x, y: best.y });
+        lastSeenRef.current = now;
+      }
+      if (now - lastSeenRef.current > 200 || now - startMsRef.current > 2500) finalize();
+      return;
+    }
+
+    // Idle: keep a lock on the resting ball, and watch for it launching.
+    const rest = restRef.current;
+    const bestMoving = moving[0] ?? null;
+
+    if (rest && bestMoving) {
+      // The ball took off: a white blob appears clearly away from address.
+      const d = Math.hypot(bestMoving.x - rest.x, bestMoving.y - rest.y);
+      if (d > 0.05) {
+        activeRef.current = true;
+        ptsRef.current = [rest, { x: bestMoving.x, y: bestMoving.y }];
+        velRef.current = { x: bestMoving.x - rest.x, y: bestMoving.y - rest.y };
+        lastSeenRef.current = now;
+        startMsRef.current = now;
+        return;
+      }
+    } else if (!rest && bestMoving && lastMovingRef.current) {
+      // Fallback (no clear address lock): catch a fast white blob in flight.
+      const d = Math.hypot(bestMoving.x - lastMovingRef.current.x, bestMoving.y - lastMovingRef.current.y);
+      if (d > 0.04 && d < 0.4) {
+        activeRef.current = true;
+        ptsRef.current = [lastMovingRef.current, { x: bestMoving.x, y: bestMoving.y }];
+        velRef.current = { x: bestMoving.x - lastMovingRef.current.x, y: bestMoving.y - lastMovingRef.current.y };
+        lastSeenRef.current = now;
+        startMsRef.current = now;
+        return;
       }
     }
-    if (activeRef.current && now - startMsRef.current > 2500) finalize();
+    lastMovingRef.current = bestMoving ? { x: bestMoving.x, y: bestMoving.y } : null;
+
+    // Update the resting-ball lock from the most ball-like stationary white blob
+    // in the lower part of the frame (where a teed/grounded ball sits).
+    const restCand = still.find((b) => b.y > 0.3 && !b.moved);
+    if (restCand) {
+      restRef.current = { x: restCand.x, y: restCand.y };
+      setReady(true);
+    } else if (!still.some((b) => b.y > 0.3)) {
+      setReady(false);
+    }
   }
 
   function finalize() {
     activeRef.current = false;
+    restRef.current = null;
+    lastMovingRef.current = null;
+    setReady(false);
     const pts = ptsRef.current.slice();
     ptsRef.current = [];
-    if (pts.length < 4) return;
+    if (pts.length < 4) return; // too few points to be a real ball flight
     // Curvature: signed horizontal deviation of the apex from the launch→end line.
     const a = pts[0];
     const b = pts[pts.length - 1];
@@ -286,15 +418,17 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
               <div>
                 <div className="text-4xl mb-2">🎥</div>
                 <p className="text-sm" style={{ color: "var(--muted)" }}>
-                  打席の後方からボールと打ち出し方向が<br />映るようにカメラを構えます
+                  白いゴルフボールが画面にはっきり映るように<br />
+                  後方からカメラを構えてください。<br />
+                  ボールを捕捉すると自動で計測します。
                 </p>
               </div>
             </div>
           )}
           {camOn && (
             <div className="absolute top-2 left-2 px-3 py-1 rounded-full text-xs font-bold"
-              style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }}>
-              ● 監視中… ショットを自動検知
+              style={{ background: "rgba(0,0,0,0.6)", color: ballReady ? "#4ade80" : "#fff" }}>
+              {ballReady ? "● ボール捕捉 — 打ってOK" : "○ ボールを探しています…"}
             </div>
           )}
           {camOn && (
@@ -361,9 +495,9 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       )}
 
       <p className="text-[11px] leading-relaxed px-1" style={{ color: "var(--muted)" }}>
-        ※ 球筋（ストレート/ドロー/フェード/スライス/フック）はカメラ映像の背景差分で軌跡を追って判定します。
+        ※ 白いゴルフボールのみを検出して軌跡を追跡し、球筋（ストレート/ドロー/フェード/スライス/フック）を判定します。
+        明るい白色・小さく丸い被写体をボールとみなすため、白い服や白背景が多いと精度が下がります。
         飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（クラブ非検出のためβ）。
-        端末負荷軽減のため軽量な検知で動作します。
       </p>
     </div>
   );
