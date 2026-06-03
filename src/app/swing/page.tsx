@@ -440,68 +440,112 @@ export default function SwingPage() {
 
   // Deterministically step through the selected range frame-by-frame (via
   // seeking) so the impact frame is never missed, regardless of device speed.
+  // Analyze the chosen trim range by PLAYING it (slowed) and grabbing every
+  // presented frame via requestVideoFrameCallback. Unlike seeking a paused
+  // video — which on iOS/Safari yields undecoded/blank frames and detects no
+  // pose — playback guarantees decoded frames, and rVFC never misses a frame
+  // (so the impact frame is always captured). Falls back to rAF when needed.
   async function scanRange() {
     const video = videoRef.current;
     const model = landmarkerRef.current ?? (await ensureModel());
     if (!video || !model) return;
+    // Stop the live camera rAF loop so it can't call detectForVideo on the same
+    // model concurrently (which would corrupt the monotonic timestamp sequence).
+    cancelAnimationFrame(rafRef.current);
     const start = trimStart;
     const end = Math.max(trimStart + 0.2, trimEnd);
     const range = end - start;
-    const step = Math.max(1 / 30, range / 120); // ≤120 samples
     analyzingRef.current = true;
     stageRef.current = "analyzing";
     setStage("analyzing");
     setNotice("");
     setScanPct(0);
-    video.pause();
 
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d") ?? null;
-    const seekTo = (t: number) =>
-      new Promise<void>((resolve) => {
-        const onSeek = () => {
-          video.removeEventListener("seeked", onSeek);
-          resolve();
-        };
-        video.addEventListener("seeked", onSeek);
-        try {
-          video.currentTime = t;
-        } catch {
-          resolve();
-        }
-      });
+    const draw = (pose: Frame) => {
+      if (!ctx || !canvas) return;
+      if (canvas.width !== video.videoWidth) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+      }
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawSkeleton(ctx, pose, canvas.width, canvas.height);
+    };
+
+    // Seek to the start (resolve even if no 'seeked' event fires).
+    await new Promise<void>((resolve) => {
+      if (Math.abs(video.currentTime - start) < 0.05) return resolve();
+      const onSeek = () => {
+        video.removeEventListener("seeked", onSeek);
+        resolve();
+      };
+      video.addEventListener("seeked", onSeek);
+      const guard = setTimeout(() => {
+        video.removeEventListener("seeked", onSeek);
+        resolve();
+      }, 800);
+      try {
+        video.currentTime = start;
+      } catch {
+        clearTimeout(guard);
+        resolve();
+      }
+    });
 
     const frames: Frame[] = [];
-    let ts = (lastTsRef.current || 0) + 1;
-    const total = Math.max(1, Math.ceil(range / step));
-    let i = 0;
-    for (let t = start; t <= end + 1e-6; t += step) {
-      await seekTo(Math.min(t, video.duration || end));
-      try {
-        ts += 1;
-        const res = model.detectForVideo(video, ts);
-        const pose = res.landmarks?.[0] as Frame | undefined;
-        if (pose) {
-          frames.push(pose);
-          if (ctx && canvas) {
-            if (canvas.width !== video.videoWidth) {
-              canvas.width = video.videoWidth;
-              canvas.height = video.videoHeight;
+    video.muted = true;
+    video.playbackRate = 0.6; // slow → more samples per frame of swing
+    await video.play().catch(() => {});
+
+    type RVFC = HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number };
+    const hasRVFC = typeof (video as RVFC).requestVideoFrameCallback === "function";
+
+    await new Promise<void>((resolve) => {
+      let stopped = false;
+      const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        resolve();
+      };
+      const schedule = () => {
+        if (stopped) return;
+        if (hasRVFC) (video as RVFC).requestVideoFrameCallback!(grab);
+        else rafRef.current = requestAnimationFrame(grab);
+      };
+      const grab = () => {
+        if (stopped) return;
+        const t = video.currentTime;
+        if (video.ended || video.paused || t >= end) return stop();
+        if (t >= start - 0.06 && video.readyState >= 2 && video.videoWidth) {
+          try {
+            const ts = Math.max(performance.now(), lastTsRef.current + 1);
+            lastTsRef.current = ts;
+            const res = model.detectForVideo(video, ts);
+            const pose = res.landmarks?.[0] as Frame | undefined;
+            if (pose) {
+              frames.push(pose);
+              draw(pose);
             }
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            drawSkeleton(ctx, pose, canvas.width, canvas.height);
+          } catch {
+            /* skip bad frame */
           }
+          setScanPct(Math.min(99, Math.round(((t - start) / range) * 100)));
         }
-      } catch {
-        /* skip bad frame */
-      }
-      i += 1;
-      setScanPct(Math.round((i / total) * 100));
-    }
-    lastTsRef.current = ts;
+        schedule();
+      };
+      schedule();
+      // Hard safety stop in case playback stalls.
+      setTimeout(stop, (range / 0.6) * 1000 + 3000);
+    });
+
+    video.pause();
+    video.playbackRate = 1;
+    setScanPct(100);
+
     const fps = range > 0 ? frames.length / range : 30;
     if (frames.length < 6) {
-      setErr("選択範囲で骨格を検出できませんでした。全身が映る範囲を選び直してください。");
+      setErr("選択範囲で骨格を検出できませんでした。被写体（全身）がもう少し大きく映る動画か、明るい場所で撮影した動画でお試しください。");
       analyzingRef.current = false;
       stageRef.current = "trim";
       setStage("trim");
