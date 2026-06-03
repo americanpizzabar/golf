@@ -2,6 +2,7 @@ import { supabase } from "./supabase";
 import { getDeviceId } from "./device";
 import type {
   ApproachSession,
+  BallShot,
   PracticeMenu,
   Pro,
   Profile,
@@ -94,6 +95,27 @@ export async function fetchMenus(limit = 20): Promise<PracticeMenu[]> {
     .order("created_at", { ascending: false })
     .limit(limit);
   return (data as PracticeMenu[]) ?? [];
+}
+
+export async function saveBallShot(
+  s: Omit<BallShot, "id" | "device_id" | "created_at">,
+): Promise<BallShot | null> {
+  const { data } = await supabase
+    .from("ball_shots")
+    .insert({ ...s, device_id: getDeviceId() })
+    .select()
+    .maybeSingle();
+  return (data as BallShot) ?? null;
+}
+
+export async function fetchBallShots(limit = 300): Promise<BallShot[]> {
+  const { data } = await supabase
+    .from("ball_shots")
+    .select("*")
+    .eq("device_id", getDeviceId())
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  return (data as BallShot[]) ?? [];
 }
 
 export async function saveRound(

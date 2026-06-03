@@ -66,6 +66,27 @@ export interface Swing {
   angles: Partial<SwingAngles>;
   thumbnail: string | null;
   note: string | null;
+  club?: string | null;
+  head_speed?: number | null;
+  hand_speed?: number | null;
+  efficiency?: number | null;
+  apex_m?: number | null;
+}
+
+export type BallShape = "straight" | "draw" | "fade" | "slice" | "hook";
+
+export interface BallShot {
+  id: string;
+  device_id: string;
+  created_at: string;
+  club: string | null;
+  shape: BallShape | null;
+  apex_m: number | null;
+  carry_m: number | null;
+  ball_speed: number | null;
+  head_speed: number | null;
+  smash: number | null;
+  curve_px: number | null;
 }
 
 export type LieType =

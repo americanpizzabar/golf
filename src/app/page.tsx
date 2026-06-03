@@ -145,6 +145,13 @@ export default function Home() {
             accent="#22c55e"
           />
           <LinkCard
+            href="/tracer"
+            icon="🎥"
+            title="AR弾道トレーサー"
+            desc="球筋を判定・弾道を描画＋クラブ分布図"
+            accent="#3b82f6"
+          />
+          <LinkCard
             href="/coach"
             icon="🧠"
             title="AIコーチ"

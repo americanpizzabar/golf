@@ -6,10 +6,11 @@ import { PageHeader, Card, Spinner, SeverityBadge } from "@/components/ui";
 import PhaseFigure from "@/components/PhaseFigure";
 import { getPoseLandmarker, drawSkeleton, type Frame } from "@/lib/pose";
 import { analyzeSwing, detectFaults, matchPro, syncRate, type SwingResult } from "@/lib/swing";
+import { CLUBS, clubFactor } from "@/lib/golf";
 import { fetchPros, getProfile, saveSwing } from "@/lib/db";
 import type { Pro, Profile, Fault, SwingAngles } from "@/lib/types";
 
-type Stage = "idle" | "loading" | "ready" | "analyzing" | "done";
+type Stage = "idle" | "loading" | "ready" | "trim" | "analyzing" | "done";
 
 // Motion-energy thresholds (mean normalized joint displacement per frame) used
 // by the continuous swing auto-detector. Tuned conservatively; the manual
@@ -63,6 +64,11 @@ export default function SwingPage() {
   const [zoomCaps, setZoomCaps] = useState<{ min: number; max: number; step: number } | null>(null);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState<string>("");
+  const [club, setClub] = useState("7I");
+  const [uploadDur, setUploadDur] = useState(0);
+  const [trimStart, setTrimStart] = useState(0);
+  const [trimEnd, setTrimEnd] = useState(0);
+  const [scanPct, setScanPct] = useState(0);
   const [pros, setPros] = useState<Pro[]>([]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [pro, setPro] = useState<Pro | null>(null);
@@ -374,62 +380,44 @@ export default function SwingPage() {
     finishAnalysis(frames, fps);
   }
 
-  // Find the swing window inside a sequence of timestamped frames (motion burst
-  // preceded by a quiet address). Returns the cropped sub-sequence + range.
-  function segmentSwing(span: Stamped[]): { frames: Stamped[]; startSec: number; endSec: number } {
-    if (span.length < 12) return { frames: span, startSec: 0, endSec: 0 };
-    const energies = span.map((f, i) => (i ? motionEnergy(f.lm, span[i - 1].lm) : 0));
-    let peakI = 0;
-    let peak = 0;
-    energies.forEach((e, i) => {
-      if (e > peak) {
-        peak = e;
-        peakI = i;
-      }
-    });
-    const peakT = span[peakI].t;
-    const seg = span.filter((f) => f.t >= peakT - 1600 && f.t <= peakT + 900);
-    if (seg.length < 8) return { frames: span, startSec: 0, endSec: span[span.length - 1].t / 1000 };
-    return { frames: seg, startSec: seg[0].t / 1000, endSec: seg[seg.length - 1].t / 1000 };
-  }
-
+  // Load an uploaded clip and enter the trim screen (the user selects exactly
+  // the swing portion). Realtime sampling dropped fast frames, so this defers
+  // to a deterministic frame-stepping scan of the chosen range.
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     setErr("");
+    setNotice("");
     setStage("loading");
     try {
       stopAll();
       resetDetector();
+      uploadingRef.current = false;
       const video = videoRef.current!;
       video.srcObject = null;
       video.src = URL.createObjectURL(file);
       video.muted = true;
       video.playsInline = true;
-      // For a file we can wait for the model so the whole clip is scanned.
       const lm = await ensureModel();
       if (!lm) {
         setStage("idle");
         return;
       }
-      uploadFramesRef.current = [];
-      uploadingRef.current = true;
-      await video.play().catch(() => {});
-      startLoop();
-      setStage("analyzing");
-      setWatch("");
-      setNotice("動画をスキャンしてスイング箇所を自動抽出中…");
-      video.onended = () => {
-        uploadingRef.current = false;
-        // Auto-detect & crop the swing within the uploaded clip.
-        const { frames, startSec, endSec } = segmentSwing(uploadFramesRef.current);
-        const durSec = frames.length > 1 ? (frames[frames.length - 1].t - frames[0].t) / 1000 : 1;
-        const fps = durSec > 0 ? frames.length / durSec : 30;
-        if (endSec > startSec) {
-          setNotice(`スイング箇所を自動抽出： ${startSec.toFixed(1)}秒〜${endSec.toFixed(1)}秒を解析`);
-        }
-        finishAnalysis(frames.map((f) => f.lm), fps);
-      };
+      await new Promise<void>((resolve) => {
+        if (video.readyState >= 1 && video.duration) return resolve();
+        video.onloadedmetadata = () => resolve();
+      });
+      const dur = Number.isFinite(video.duration) ? video.duration : 0;
+      setUploadDur(dur);
+      setTrimStart(0);
+      setTrimEnd(dur);
+      try {
+        video.pause();
+        video.currentTime = 0;
+      } catch {
+        /* ignore */
+      }
+      setStage("trim");
     } catch (e) {
       setErr("動画を読み込めませんでした。別の動画ファイルでお試しください。");
       setStage("idle");
@@ -437,7 +425,92 @@ export default function SwingPage() {
     }
   }
 
-  function finishAnalysis(frames: Frame[], fps: number) {
+  // Seek the upload preview to a time (used when dragging the trim handles).
+  function seekPreview(t: number) {
+    const video = videoRef.current;
+    if (video) {
+      try {
+        video.currentTime = Math.min(Math.max(0, t), uploadDur || t);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // Deterministically step through the selected range frame-by-frame (via
+  // seeking) so the impact frame is never missed, regardless of device speed.
+  async function scanRange() {
+    const video = videoRef.current;
+    const model = landmarkerRef.current ?? (await ensureModel());
+    if (!video || !model) return;
+    const start = trimStart;
+    const end = Math.max(trimStart + 0.2, trimEnd);
+    const range = end - start;
+    const step = Math.max(1 / 30, range / 120); // ≤120 samples
+    analyzingRef.current = true;
+    stageRef.current = "analyzing";
+    setStage("analyzing");
+    setNotice("");
+    setScanPct(0);
+    video.pause();
+
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d") ?? null;
+    const seekTo = (t: number) =>
+      new Promise<void>((resolve) => {
+        const onSeek = () => {
+          video.removeEventListener("seeked", onSeek);
+          resolve();
+        };
+        video.addEventListener("seeked", onSeek);
+        try {
+          video.currentTime = t;
+        } catch {
+          resolve();
+        }
+      });
+
+    const frames: Frame[] = [];
+    let ts = (lastTsRef.current || 0) + 1;
+    const total = Math.max(1, Math.ceil(range / step));
+    let i = 0;
+    for (let t = start; t <= end + 1e-6; t += step) {
+      await seekTo(Math.min(t, video.duration || end));
+      try {
+        ts += 1;
+        const res = model.detectForVideo(video, ts);
+        const pose = res.landmarks?.[0] as Frame | undefined;
+        if (pose) {
+          frames.push(pose);
+          if (ctx && canvas) {
+            if (canvas.width !== video.videoWidth) {
+              canvas.width = video.videoWidth;
+              canvas.height = video.videoHeight;
+            }
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawSkeleton(ctx, pose, canvas.width, canvas.height);
+          }
+        }
+      } catch {
+        /* skip bad frame */
+      }
+      i += 1;
+      setScanPct(Math.round((i / total) * 100));
+    }
+    lastTsRef.current = ts;
+    const fps = range > 0 ? frames.length / range : 30;
+    if (frames.length < 6) {
+      setErr("選択範囲で骨格を検出できませんでした。全身が映る範囲を選び直してください。");
+      analyzingRef.current = false;
+      stageRef.current = "trim";
+      setStage("trim");
+      return;
+    }
+    setNotice(`選択範囲 ${start.toFixed(1)}〜${end.toFixed(1)}秒（${frames.length}コマ）を解析`);
+    finishAnalysis(frames, fps, "trim");
+  }
+
+  function finishAnalysis(frames: Frame[], fps: number, backStage: Stage = "ready") {
     analyzingRef.current = true;
     stageRef.current = "analyzing";
     setStage("analyzing");
@@ -448,6 +521,7 @@ export default function SwingPage() {
         heightCm: profile?.height_cm ?? undefined,
         leftHanded,
         fps,
+        clubFactor: clubFactor(club),
       });
       if (!r.valid) {
         setErr(
@@ -455,10 +529,10 @@ export default function SwingPage() {
             ? "骨格を検出できませんでした。全身（頭から足まで）がフレームに入るようカメラから2〜3m離れ、明るい場所で再撮影してください。"
             : "スイングをうまく解析できませんでした。全身が映る位置で、もう一度ゆっくりスイングしてみてください。",
         );
-        // Re-arm the continuous detector and keep watching.
+        // Re-arm the continuous detector / return to the trim screen.
         resetDetector();
-        stageRef.current = "ready";
-        setStage("ready");
+        stageRef.current = backStage;
+        setStage(backStage);
         return;
       }
       const f = detectFaults(r, pro);
@@ -479,8 +553,8 @@ export default function SwingPage() {
       console.error("swing analysis failed", e);
       setErr("解析中に問題が発生しました。もう一度お試しください。");
       resetDetector();
-      stageRef.current = "ready";
-      setStage("ready");
+      stageRef.current = backStage;
+      setStage(backStage);
     }
   }
 
@@ -498,6 +572,11 @@ export default function SwingPage() {
       angles: result.angles as SwingAngles,
       thumbnail: null,
       note: null,
+      club,
+      head_speed: result.headSpeed,
+      hand_speed: result.handSpeed,
+      efficiency: result.efficiency,
+      apex_m: null,
     });
     setSaved(true);
   }
@@ -521,6 +600,17 @@ export default function SwingPage() {
           <Link href="/profile" className="card p-3 text-sm block">
             ⚠️ 先に<span style={{ color: "var(--green)" }}>体型プロフィール</span>を登録すると、あなたに最適なプロと比較できます（未登録時は標準体型で比較）。
           </Link>
+        )}
+
+        {showCamera && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>使用クラブ</span>
+            <select value={club} onChange={(e) => setClub(e.target.value)} className="flex-1 px-2 py-2 text-sm">
+              {CLUBS.map((c) => (
+                <option key={c.id} value={c.id}>{c.label}</option>
+              ))}
+            </select>
+          </div>
         )}
 
         {/* Camera / video stage */}
@@ -589,11 +679,80 @@ export default function SwingPage() {
               )}
               {stage === "analyzing" && (
                 <div className="absolute inset-0 grid place-items-center bg-black/40">
-                  <Spinner label="スイングを解析中…" />
+                  <div className="text-center">
+                    <Spinner label={scanPct > 0 ? `スキャン中… ${scanPct}%` : "スイングを解析中…"} />
+                  </div>
                 </div>
               )}
             </div>
           </Card>
+
+          {/* Video trim: choose exactly the swing portion */}
+          {stage === "trim" && (
+            <div className="mt-3 space-y-3">
+              <Card>
+                <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+                  解析するスイングの範囲を指定（不要な素振り・歩行を除外すると精度が上がります）
+                </div>
+                <div className="space-y-3">
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1" style={{ color: "var(--muted)" }}>
+                      <span>開始: {trimStart.toFixed(1)}秒</span>
+                      <button onClick={() => seekPreview(trimStart)} className="underline" style={{ color: "var(--green)" }}>
+                        この位置を表示
+                      </button>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={uploadDur || 0}
+                      step={0.1}
+                      value={trimStart}
+                      onChange={(e) => {
+                        const v = Math.min(Number(e.target.value), trimEnd - 0.2);
+                        setTrimStart(v);
+                        seekPreview(v);
+                      }}
+                      className="w-full"
+                    />
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1" style={{ color: "var(--muted)" }}>
+                      <span>終了: {trimEnd.toFixed(1)}秒</span>
+                      <button onClick={() => seekPreview(trimEnd)} className="underline" style={{ color: "var(--green)" }}>
+                        この位置を表示
+                      </button>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={uploadDur || 0}
+                      step={0.1}
+                      value={trimEnd}
+                      onChange={(e) => {
+                        const v = Math.max(Number(e.target.value), trimStart + 0.2);
+                        setTrimEnd(v);
+                        seekPreview(v);
+                      }}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="text-[11px]" style={{ color: "var(--muted)" }}>
+                    選択範囲 {(trimEnd - trimStart).toFixed(1)}秒（アドレス〜フィニッシュが収まる長さが目安）
+                  </div>
+                </div>
+              </Card>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="btn btn-ghost py-3 text-center cursor-pointer">
+                  別の動画
+                  <input type="file" accept="video/*" className="hidden" onChange={onFile} />
+                </label>
+                <button onClick={scanRange} className="btn btn-primary py-3">
+                  ✂ この範囲を解析
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Lens + zoom controls (live camera only) */}
           {stage === "ready" && (
@@ -812,6 +971,44 @@ function Results({
             <Metric label="あなた" value={`${result.swingPlane}°`} color="var(--cyan)" />
             <Metric label={pro.name} value={`${pro.swing_plane_deg}°`} color={pro.accent} />
           </div>
+        </Card>
+      )}
+
+      {/* Virtual head speed / efficiency */}
+      {result.headSpeed > 0 && (
+        <Card>
+          <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+            バーチャル・ヘッドスピード（骨格＋映像から推定）
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="rounded-xl py-2" style={{ background: "var(--bg-soft)" }}>
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>推定ヘッドスピード</div>
+              <div className="font-bold text-xl" style={{ color: "var(--cyan)" }}>
+                {result.headSpeed}<span className="text-xs">m/s</span>
+              </div>
+            </div>
+            <div className="rounded-xl py-2" style={{ background: "var(--bg-soft)" }}>
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>手元スピード</div>
+              <div className="font-bold text-xl">
+                {result.handSpeed}<span className="text-xs">m/s</span>
+              </div>
+            </div>
+            <div className="rounded-xl py-2" style={{ background: "var(--bg-soft)" }}>
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>効率（タメ）</div>
+              <div
+                className="font-bold text-xl"
+                style={{ color: result.efficiency >= 60 ? "var(--green)" : "var(--amber)" }}
+              >
+                {result.efficiency}
+              </div>
+            </div>
+          </div>
+          <p className="text-[11px] mt-2" style={{ color: "var(--muted)" }}>
+            {result.efficiency >= 60
+              ? "タメが解けて効率よく加速できています（手元の減速→ヘッドが走る）。"
+              : "手元が走り続け＝手打ち傾向。下半身リードでタメを保ちましょう。"}
+            {" "}※ クラブ非検出のため映像と骨格からの推定値です。
+          </p>
         </Card>
       )}
 

@@ -485,6 +485,90 @@ export function youtubeSearch(query: string): string {
   return `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
 }
 
+// Clubs + parameters used across the app:
+//  factor   = hand→clubhead lever ratio (head-speed estimate)
+//  loft     = nominal loft (deg)
+//  defHS    = typical amateur head speed (m/s) — fallback when no measured value
+//  smash    = typical smash factor (ball speed = head speed × smash)
+//  carryK   = carry meters per m/s of head speed (empirical)
+//  apexK    = apex meters per m/s of head speed (empirical)
+export interface ClubSpec {
+  id: string;
+  label: string;
+  factor: number;
+  loft: number;
+  defHS: number;
+  smash: number;
+  carryK: number;
+  apexK: number;
+}
+export const CLUBS: ClubSpec[] = [
+  { id: "DR", label: "ドライバー", factor: 2.45, loft: 11, defHS: 42, smash: 1.48, carryK: 5.0, apexK: 0.72 },
+  { id: "3W", label: "3W", factor: 2.35, loft: 15, defHS: 40, smash: 1.45, carryK: 4.6, apexK: 0.74 },
+  { id: "UT", label: "UT", factor: 2.2, loft: 19, defHS: 38, smash: 1.42, carryK: 4.4, apexK: 0.78 },
+  { id: "5I", label: "5番アイアン", factor: 2.1, loft: 27, defHS: 36, smash: 1.39, carryK: 4.2, apexK: 0.8 },
+  { id: "7I", label: "7番アイアン", factor: 2.0, loft: 34, defHS: 33, smash: 1.38, carryK: 4.0, apexK: 0.85 },
+  { id: "9I", label: "9番アイアン", factor: 1.9, loft: 42, defHS: 30, smash: 1.33, carryK: 3.6, apexK: 0.9 },
+  { id: "PW", label: "PW", factor: 1.85, loft: 46, defHS: 28, smash: 1.28, carryK: 3.3, apexK: 0.9 },
+  { id: "SW", label: "SW", factor: 1.75, loft: 56, defHS: 25, smash: 1.2, carryK: 2.6, apexK: 0.85 },
+];
+
+export function clubSpec(id: string): ClubSpec {
+  return CLUBS.find((c) => c.id === id) ?? CLUBS[4];
+}
+export function clubFactor(id: string): number {
+  return clubSpec(id).factor;
+}
+
+// 弾道の推定値（クラブ＋ヘッドスピードから）。距離はカメラではなく物理推定。
+export function estimateBall(clubId: string, headSpeed: number) {
+  const c = clubSpec(clubId);
+  const hs = headSpeed > 0 ? headSpeed : c.defHS;
+  const ballSpeed = Math.round(hs * c.smash * 10) / 10;
+  const carry = Math.round(hs * c.carryK);
+  const apex = Math.round(hs * c.apexK);
+  return { ballSpeed, carry, apex, smash: c.smash, headSpeed: Math.round(hs * 10) / 10 };
+}
+export function clubLabel(id: string): string {
+  return CLUBS.find((c) => c.id === id)?.label ?? id;
+}
+export function clubLoft(id: string): number {
+  return CLUBS.find((c) => c.id === id)?.loft ?? 34;
+}
+
+const SHAPE_LABEL: Record<string, string> = {
+  straight: "ストレート",
+  draw: "ドロー",
+  fade: "フェード",
+  slice: "スライス",
+  hook: "フック",
+};
+// テレビ中継風のカラーコーディング（良い球=青系、危険=オレンジ/赤）。
+const SHAPE_COLOR: Record<string, string> = {
+  straight: "#22d3ee",
+  draw: "#3b82f6",
+  fade: "#a3e635",
+  slice: "#fb923c",
+  hook: "#f43f5e",
+};
+export function shapeLabel(s: string): string {
+  return SHAPE_LABEL[s] ?? s;
+}
+export function shapeColor(s: string): string {
+  return SHAPE_COLOR[s] ?? "#22d3ee";
+}
+
+// 左右の曲がり量(正規化)から球筋を判定（右打ち基準）。
+export function classifyShape(curveNorm: number, leftHanded = false): BallShapeLite {
+  const c = leftHanded ? -curveNorm : curveNorm;
+  if (c > 0.12) return "slice";
+  if (c > 0.04) return "fade";
+  if (c < -0.12) return "hook";
+  if (c < -0.04) return "draw";
+  return "straight";
+}
+type BallShapeLite = "straight" | "draw" | "fade" | "slice" | "hook";
+
 // ② ディスパーション（着弾の散らばり）分析。重心とバラつきから癖を逆引き。
 export interface DispersionStats {
   n: number;

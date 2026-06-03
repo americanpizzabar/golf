@@ -110,6 +110,9 @@ export interface SwingResult {
   tempoRatio: number;
   swayCm: number;
   leadArmImpact: number; // for chicken wing (lead arm angle at impact)
+  handSpeed: number; // 推定リード手元スピード (m/s)
+  headSpeed: number; // 推定ヘッドスピード (m/s)
+  efficiency: number; // 0-100: 手元→ヘッドの効率（タメの解放）
   earlyExtensionDeg: number; // 起き上がり量（アドレス比、+で起き上がり）
   rootCause: RootCauseStep[]; // リバース・エンジニアリング診断
   phaseIdx: { address: number; top: number; impact: number; finish: number };
@@ -119,7 +122,7 @@ export interface SwingResult {
 // Analyze a sequence of pose frames into golf swing metrics.
 export function analyzeSwing(
   frames: Frame[],
-  opts: { heightCm?: number; leftHanded?: boolean; fps?: number } = {},
+  opts: { heightCm?: number; leftHanded?: boolean; fps?: number; clubFactor?: number } = {},
 ): SwingResult {
   const fps = opts.fps && opts.fps > 0 ? opts.fps : 30;
   const fm = frames.map((f) => frameMetrics(f, opts.leftHanded));
@@ -140,6 +143,9 @@ export function analyzeSwing(
       tempoRatio: 0,
       swayCm: 0,
       leadArmImpact: 0,
+      handSpeed: 0,
+      headSpeed: 0,
+      efficiency: 0,
       earlyExtensionDeg: 0,
       rootCause: [],
       phaseIdx: { address: 0, top: 0, impact: 0, finish: 0 },
@@ -211,6 +217,34 @@ export function analyzeSwing(
   // The follow-through naturally folds the arm, so it must NOT be averaged in.
   const leadArmImpact = Math.round(fm[impactIdx].leadArmAngle);
 
+  // ② バーチャル・ヘッドスピード：リード手首の移動ピクセル/フレームを実寸へ換算。
+  // metersPerNorm = 身長(m) / 体の縦ピクセル割合(正規化)。
+  const metersPerNorm = (heightCm / 100) / bodyPx;
+  const dt = 1 / fps;
+  const wristSpeedAt = (i: number) => {
+    if (i <= 0) return 0;
+    const a = fm[i].leadArm.wr;
+    const b = fm[i - 1].leadArm.wr;
+    return (Math.hypot(a.x - b.x, a.y - b.y) * metersPerNorm) / dt;
+  };
+  let peakHand = 0;
+  let peakHandIdx = impactIdx;
+  for (let i = topIdx + 1; i <= Math.min(impactIdx + 1, fm.length - 1); i++) {
+    const s = wristSpeedAt(i);
+    if (s > peakHand) {
+      peakHand = s;
+      peakHandIdx = i;
+    }
+  }
+  const handSpeed = Math.round(peakHand * 10) / 10;
+  const clubFactor = opts.clubFactor ?? 2.0;
+  const headSpeed = Math.round(peakHand * clubFactor * 10) / 10;
+  // 効率：ピーク手元速度がインパクト“手前”に来て、インパクトで減速＝エネルギー伝達(良)。
+  const handAtImpact = wristSpeedAt(impactIdx);
+  const decel = peakHand > 0 ? (peakHand - handAtImpact) / peakHand : 0;
+  const timing = peakHandIdx <= impactIdx ? 1 : 0.7; // ピークが遅れる=解けが遅い
+  const efficiency = Math.max(0, Math.min(100, Math.round((35 + decel * 130) * timing)));
+
   // ① リバース・エンジニアリング診断（ドミノ倒し）
   // 「結果（インパクトでの起き上がり）」から時間を巻き戻して根本原因を辿る。
   const dtMs = 1000 / fps;
@@ -269,6 +303,9 @@ export function analyzeSwing(
     tempoRatio,
     swayCm,
     leadArmImpact,
+    handSpeed,
+    headSpeed,
+    efficiency,
     earlyExtensionDeg,
     rootCause,
     phaseIdx: {
