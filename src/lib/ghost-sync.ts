@@ -26,6 +26,29 @@ const leadWrist = (leftHanded: boolean) => (leftHanded ? LM.rWrist : LM.lWrist);
 const X = (f: number[], i: number) => f[i * 2];
 const Y = (f: number[], i: number) => f[i * 2 + 1];
 
+// --- Camera angle auto-detection (Front vs Down-the-Line) ------------------
+export type ViewAngle = "front" | "dtl";
+export const ANGLE_LABEL: Record<ViewAngle, string> = { front: "正面ビュー", dtl: "後方ビュー(DTL)" };
+
+// Shoulder width collapses when the golfer is side-on (DTL), while torso height
+// stays similar — so shoulderWidth / torsoHeight cleanly separates the two.
+export function angleRatio(f: number[]): number {
+  const shW = Math.abs(X(f, LM.lShoulder) - X(f, LM.rShoulder));
+  const torso =
+    Math.abs((Y(f, LM.lShoulder) + Y(f, LM.rShoulder)) / 2 - (Y(f, LM.lHip) + Y(f, LM.rHip)) / 2) || 1e-3;
+  return shW / torso;
+}
+export function angleOfFrame(f: number[]): ViewAngle {
+  return angleRatio(f) > 0.85 ? "front" : "dtl";
+}
+// Vote across the address region (first few frames) for stability.
+export function detectAngle(frames: number[][]): ViewAngle {
+  const n = Math.min(frames.length, 6);
+  let front = 0;
+  for (let i = 0; i < n; i++) if (angleOfFrame(frames[i]) === "front") front++;
+  return front * 2 >= n ? "front" : "dtl";
+}
+
 // Detect the 8 swing events, returned as fractional frame indices (increasing).
 export function detectEvents(frames: number[][], leftHanded: boolean): number[] {
   const n = frames.length;

@@ -19,6 +19,8 @@ import {
   EVENT_NAMES,
   EVENT_PHASES,
   detectEvents,
+  detectAngle,
+  ANGLE_LABEL,
   interpFrame,
   phaseToFrame,
   phaseEventName,
@@ -26,6 +28,7 @@ import {
   kinematics,
   sequenceVerdict,
   type JointDeviation,
+  type ViewAngle,
 } from "@/lib/ghost-sync";
 import { fetchSwings, getProfile, fetchPros } from "@/lib/db";
 import type { Swing, Pro } from "@/lib/types";
@@ -72,6 +75,11 @@ export default function GhostPage() {
   const a = swings.find((s) => s.id === aId);
   const b = ghostChoices.find((s) => s.id === bId);
 
+  // Auto-detect the camera angle from the current swing (with manual override).
+  const [angleOverride, setAngleOverride] = useState<ViewAngle | null>(null);
+  const autoAngle: ViewAngle = a ? detectAngle(a.pose_frames!) : "front";
+  const angle: ViewAngle = angleOverride ?? autoAngle;
+
   return (
     <main>
       <PageHeader title="ゴースト・フレーム同期" subtitle="8イベントで完全同期・関節ズレを可視化" back />
@@ -107,13 +115,44 @@ export default function GhostPage() {
               </div>
             </Card>
 
+            <Card>
+              <div className="flex items-center justify-between">
+                <div className="text-sm">
+                  <span style={{ color: "var(--muted)" }}>アングル自動判別：</span>
+                  <span className="font-bold" style={{ color: "var(--cyan)" }}>{ANGLE_LABEL[angle]}</span>
+                  {!angleOverride && <span className="text-[11px] ml-1" style={{ color: "var(--muted)" }}>（自動）</span>}
+                </div>
+                <div className="flex gap-1">
+                  {([["自動", null], ["正面", "front"], ["後方", "dtl"]] as const).map(([lbl, v]) => (
+                    <button
+                      key={lbl}
+                      onClick={() => setAngleOverride(v)}
+                      className="px-2 py-1 rounded text-[11px]"
+                      style={{
+                        background: (angleOverride ?? "auto") === (v ?? "auto") ? "var(--green)" : "var(--bg-soft)",
+                        color: (angleOverride ?? "auto") === (v ?? "auto") ? "#03260f" : "var(--muted)",
+                      }}
+                    >
+                      {lbl}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
+                {angle === "front"
+                  ? "正面：頭の上下動（軸の上下ブレ）と腰のスウェー（左右ブレ）をガイド表示します。"
+                  : "後方(DTL)：スイングプレーンとお尻の壁（アーリーエクステンション）をガイド表示します。"}
+              </div>
+            </Card>
+
             {a && b && (
               <>
                 <SyncPlayer
-                  key={`${a.id}-${b.id}`}
+                  key={`${a.id}-${b.id}-${angle}`}
                   a={a.pose_frames!}
                   b={b.pose_frames!}
                   leftHanded={leftHanded}
+                  angle={angle}
                 />
                 <KinematicSequence frames={a.pose_frames!} leftHanded={leftHanded} />
               </>
@@ -155,7 +194,7 @@ const SPEEDS = [
   { label: "x1", dur: 1.5 },
 ];
 
-function SyncPlayer({ a, b, leftHanded }: { a: number[][]; b: number[][]; leftHanded: boolean }) {
+function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][]; leftHanded: boolean; angle: ViewAngle }) {
   const SIZE = 360;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
@@ -164,10 +203,12 @@ function SyncPlayer({ a, b, leftHanded }: { a: number[][]; b: number[][]; leftHa
   const lastUIRef = useRef(0);
   const durRef = useRef(SPEEDS[1].dur);
 
+  const guideRef = useRef("");
   const [phase, setPhase] = useState(0);
   const [playing, setPlaying] = useState(true);
   const [speedI, setSpeedI] = useState(1);
   const [alerts, setAlerts] = useState<JointDeviation[]>([]);
+  const [guide, setGuide] = useState("");
 
   const eventsA = useMemo(() => detectEvents(a, leftHanded), [a, leftHanded]);
   const eventsB = useMemo(() => detectEvents(b, leftHanded), [b, leftHanded]);
@@ -185,6 +226,12 @@ function SyncPlayer({ a, b, leftHanded }: { a: number[][]; b: number[][]; leftHa
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
+    // Address-frame reference + lead/trail indices for angle-specific guides.
+    const TA0 = txA(a[0]);
+    const leadW = leftHanded ? LM.rWrist : LM.lWrist;
+    const trailSh = leftHanded ? LM.lShoulder : LM.rShoulder;
+    const trailHip = leftHanded ? LM.lHip : LM.rHip;
+    const cmPerUnit = 256; // ≈ body-height scale → rough cm (assumes ~170cm)
     let last = performance.now();
     const loop = (now: number) => {
       const dt = (now - last) / 1000;
@@ -222,17 +269,63 @@ function SyncPlayer({ a, b, leftHanded }: { a: number[][]; b: number[][]; leftHa
         ctx.stroke();
       }
 
+      // Angle-specific checkpoint guides.
+      ctx.save();
+      ctx.lineWidth = 1.5;
+      if (angle === "front") {
+        const hx = TA0[LM.nose].x * SIZE;
+        const hy = TA0[LM.nose].y * SIZE;
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = "rgba(125,211,252,0.5)"; // head reference crosshair
+        ctx.beginPath(); ctx.moveTo(hx, 0); ctx.lineTo(hx, SIZE); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, hy); ctx.lineTo(SIZE, hy); ctx.stroke();
+        ctx.strokeStyle = "rgba(34,197,94,0.45)"; // hip-sway rails
+        for (const i of [LM.lHip, LM.rHip]) {
+          const xx = TA0[i].x * SIZE;
+          ctx.beginPath(); ctx.moveTo(xx, 0); ctx.lineTo(xx, SIZE); ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        const bob = Math.abs(TA[LM.nose].y - TA0[LM.nose].y);
+        const sway = Math.abs((TA[LM.lHip].x + TA[LM.rHip].x) / 2 - (TA0[LM.lHip].x + TA0[LM.rHip].x) / 2);
+        const warn = bob > 0.04 || sway > 0.04;
+        ctx.fillStyle = warn ? "#f43f5e" : "#7dd3fc";
+        ctx.beginPath(); ctx.arc(TA[LM.nose].x * SIZE, TA[LM.nose].y * SIZE, 4, 0, Math.PI * 2); ctx.fill();
+        guideRef.current = `頭の上下 ${(bob * cmPerUnit).toFixed(1)}cm ／ 腰スウェー ${(sway * cmPerUnit).toFixed(1)}cm`;
+      } else {
+        const wx = TA0[leadW].x * SIZE;
+        const wy = TA0[leadW].y * SIZE;
+        const sx = TA0[trailSh].x * SIZE;
+        const sy = TA0[trailSh].y * SIZE;
+        let dx = sx - wx;
+        let dy = sy - wy;
+        const dl = Math.hypot(dx, dy) || 1;
+        dx /= dl; dy /= dl;
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = "rgba(125,211,252,0.55)"; // swing-plane line
+        ctx.beginPath(); ctx.moveTo(wx - dx * SIZE, wy - dy * SIZE); ctx.lineTo(sx + dx * SIZE, sy + dy * SIZE); ctx.stroke();
+        const wallX = TA0[trailHip].x * SIZE; // early-extension wall
+        ctx.strokeStyle = "rgba(34,197,94,0.5)";
+        ctx.beginPath(); ctx.moveTo(wallX, 0); ctx.lineTo(wallX, SIZE); ctx.stroke();
+        ctx.setLineDash([]);
+        const move = Math.abs(TA[trailHip].x - TA0[trailHip].x);
+        ctx.fillStyle = move > 0.05 ? "#f43f5e" : "#7dd3fc";
+        ctx.beginPath(); ctx.arc(TA[trailHip].x * SIZE, TA[trailHip].y * SIZE, 4, 0, Math.PI * 2); ctx.fill();
+        guideRef.current = `お尻の前後動 ${(move * cmPerUnit).toFixed(1)}cm（壁からのズレ）`;
+      }
+      ctx.restore();
+
       // Throttle React state updates (~18fps) to keep the UI light.
       if (now - lastUIRef.current > 55) {
         lastUIRef.current = now;
         setPhase(ph);
         setAlerts(devs);
+        setGuide(guideRef.current);
       }
       rafRef.current = requestAnimationFrame(loop);
     };
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [a, b, eventsA, eventsB, txA, txB]);
+  }, [a, b, eventsA, eventsB, txA, txB, angle, leftHanded]);
 
   const seek = (p: number) => {
     phaseRef.current = Math.max(0, Math.min(1, p));
@@ -319,6 +412,16 @@ function SyncPlayer({ a, b, leftHanded }: { a: number[][]; b: number[][]; leftHa
           );
         })}
       </div>
+
+      {/* Angle checkpoint readout */}
+      {guide && (
+        <div className="mt-2 flex items-center gap-2 text-xs">
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold" style={{ background: "var(--cyan)", color: "#04121f" }}>
+            {angle === "front" ? "正面チェック" : "後方チェック"}
+          </span>
+          <span style={{ color: "var(--muted)" }}>{guide}</span>
+        </div>
+      )}
 
       {/* Heat-map readout */}
       <div className="mt-3">

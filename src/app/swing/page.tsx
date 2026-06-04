@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { PageHeader, Card, Spinner, SeverityBadge } from "@/components/ui";
 import PhaseFigure from "@/components/PhaseFigure";
-import { getPoseLandmarker, drawSkeleton, type Frame } from "@/lib/pose";
+import { getPoseLandmarker, drawSkeleton, LM, type Frame } from "@/lib/pose";
 import { analyzeSwing, detectFaults, matchPro, syncRate, compactFrames, type SwingResult } from "@/lib/swing";
+import { ANGLE_LABEL, type ViewAngle } from "@/lib/ghost-sync";
 import { CLUBS, clubFactor } from "@/lib/golf";
 import { fetchPros, getProfile, saveSwing } from "@/lib/db";
 import type { Pro, Profile, Fault, SwingAngles } from "@/lib/types";
@@ -52,6 +53,8 @@ export default function SwingPage() {
   const stageRef = useRef<Stage>("idle");
   const autoRef = useRef(true);
   const lastFramesRef = useRef<Frame[]>([]);
+  const angleEmaRef = useRef(0); // smoothed shoulderW/torso ratio
+  const liveAngleRef = useRef<ViewAngle | null>(null);
 
   const [stage, setStage] = useState<Stage>("idle");
   const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -59,6 +62,7 @@ export default function SwingPage() {
   const [autoDetect, setAutoDetect] = useState(true);
   const [manualRec, setManualRec] = useState(false);
   const [watch, setWatch] = useState("");
+  const [liveAngle, setLiveAngle] = useState<ViewAngle | null>(null);
   const [notice, setNotice] = useState("");
   const [zoom, setZoom] = useState(1);
   const [hasNativeZoom, setHasNativeZoom] = useState(false);
@@ -162,6 +166,25 @@ export default function SwingPage() {
     rafRef.current = requestAnimationFrame(loop);
   }
 
+  // Auto-detect Front vs Down-the-Line from the live pose (shoulderW/torso),
+  // smoothed so it doesn't flicker mid-swing.
+  function detectLiveAngle(pose: Frame) {
+    const ls = pose[LM.lShoulder];
+    const rs = pose[LM.rShoulder];
+    const lh = pose[LM.lHip];
+    const rh = pose[LM.rHip];
+    if (!ls || !rs || !lh || !rh) return;
+    const shW = Math.abs(ls.x - rs.x);
+    const torso = Math.abs((ls.y + rs.y) / 2 - (lh.y + rh.y) / 2) || 1e-3;
+    const ratio = shW / torso;
+    angleEmaRef.current = angleEmaRef.current ? angleEmaRef.current * 0.9 + ratio * 0.1 : ratio;
+    const a: ViewAngle = angleEmaRef.current > 0.85 ? "front" : "dtl";
+    if (a !== liveAngleRef.current) {
+      liveAngleRef.current = a;
+      setLiveAngle(a);
+    }
+  }
+
   function loop() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -181,6 +204,7 @@ export default function SwingPage() {
           const pose = res.landmarks?.[0] as Frame | undefined;
           if (pose) {
             drawSkeleton(ctx, pose, canvas.width, canvas.height);
+            detectLiveAngle(pose);
             if (uploadingRef.current) {
               // Use the clip's own time so the swing can be cropped accurately.
               uploadFramesRef.current.push({ lm: pose, t: video.currentTime * 1000 });
@@ -849,6 +873,14 @@ export default function SwingPage() {
                     style={{ background: swingHot ? "#fff" : "var(--green)" }}
                   />
                   {watch}
+                </div>
+              )}
+              {stage === "ready" && !isUpload && liveAngle && (
+                <div
+                  className="absolute top-2 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-full text-[11px] font-bold"
+                  style={{ background: "rgba(0,0,0,0.6)", color: "#7dd3fc" }}
+                >
+                  📐 {ANGLE_LABEL[liveAngle]}（自動）
                 </div>
               )}
               {stage === "idle" && (
