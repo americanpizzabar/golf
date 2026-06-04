@@ -430,11 +430,13 @@ export default function SwingPage() {
       setPan({ x: 0, y: 0 });
       try {
         video.pause();
-        video.currentTime = 0;
       } catch {
         /* ignore */
       }
       setStage("trim");
+      // Show the first frame (paused). A tiny non-zero seek forces the frame to
+      // be presented so it actually renders on mobile.
+      setTimeout(() => seekPreview(0.03), 60);
     } catch (e) {
       setErr("動画を読み込めませんでした。別の動画ファイルでお試しください。");
       setStage("idle");
@@ -497,15 +499,44 @@ export default function SwingPage() {
   const cropCy = pan.y + 1 / uZoom / 2;
   const zoomTransform = `scale(${uZoom}) translate(${(0.5 - cropCx) * 100}%, ${(0.5 - cropCy) * 100}%)`;
 
-  // Seek the upload preview to a time (used when dragging the trim handles).
+  // Draw the video's current frame onto the overlay canvas. Seeking a *paused*
+  // video does not reliably repaint the <video> element on iOS/Safari, so we
+  // render the frame ourselves; the canvas shares the video's transform, so the
+  // zoom/pan still applies and it stays pixel-aligned with the (hidden) video.
+  function renderPreviewFrame() {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || !video.videoWidth) return;
+    if (canvas.width !== video.videoWidth) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
+
+  // Seek the upload preview to a time and render that exact frame. The frame is
+  // drawn once it is actually presented (requestVideoFrameCallback — which fires
+  // after a seek even while paused), with 'seeked' + a timeout as fallbacks.
   function seekPreview(t: number) {
     const video = videoRef.current;
-    if (video) {
-      try {
-        video.currentTime = Math.min(Math.max(0, t), uploadDur || t);
-      } catch {
-        /* ignore */
-      }
+    if (!video) return;
+    const clamped = Math.min(Math.max(0, t), uploadDur || t);
+    type RVFC = HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number };
+    const v = video as RVFC;
+    if (typeof v.requestVideoFrameCallback === "function") {
+      v.requestVideoFrameCallback(() => renderPreviewFrame());
+    }
+    const onSeeked = () => {
+      video.removeEventListener("seeked", onSeeked);
+      renderPreviewFrame();
+    };
+    video.addEventListener("seeked", onSeeked);
+    setTimeout(renderPreviewFrame, 160); // safety net (e.g. time unchanged)
+    try {
+      video.currentTime = clamped;
+    } catch {
+      /* ignore */
     }
   }
 
@@ -773,7 +804,6 @@ export default function SwingPage() {
               <video
                 ref={videoRef}
                 playsInline
-                autoPlay
                 muted
                 className="absolute inset-0 w-full h-full object-contain"
                 style={{ transform: isUpload ? zoomTransform : cameraTransform }}
