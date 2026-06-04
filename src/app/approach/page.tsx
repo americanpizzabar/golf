@@ -22,14 +22,54 @@ const ZONE_COLOR: Record<Shot["zone"], string> = {
   out: "#ef4444",
 };
 
-function zoneOfDist(d: number): Shot["zone"] {
-  if (d <= 0.15) return "holed";
-  if (d <= 1) return "in1";
-  if (d <= 2) return "in2";
+// Zone from ground-meters (a = left/right, b = depth) using the chosen success
+// ellipse (wx across, wd depth). The shape lets players bias the target to a
+// practice goal (depth control vs. line control).
+function zoneOfAB(a: number, b: number, wx: number, wd: number): Shot["zone"] {
+  if (Math.hypot(a, b) <= 0.15) return "holed";
+  const e = Math.hypot(a / wx, b / wd);
+  if (e <= 1) return "in1";
+  if (e <= 2) return "in2";
   return "out";
 }
 function round1(n: number) {
   return Math.round(n * 10) / 10;
+}
+
+type V2 = { x: number; y: number };
+
+// Target-shape presets: tolerance radii (m) across (wx) and in depth (wd).
+const SHAPES = {
+  round: { wx: 1, wd: 1, label: "まる（標準1m）" },
+  vertical: { wx: 0.7, wd: 1.4, label: "縦長（前後の距離合わせ）" },
+  horizontal: { wx: 1.4, wd: 0.7, label: "横長（左右のライン重視）" },
+} as const;
+type ShapeKey = keyof typeof SHAPES;
+
+// Solve P - pin = a·vRight + b·vDepth  →  ground meters (a across, b depth).
+function toGround(P: V2, pin: V2, vR: V2, vD: V2): { a: number; b: number } {
+  const det = vR.x * vD.y - vD.x * vR.y || 1e-6;
+  const ex = P.x - pin.x;
+  const ey = P.y - pin.y;
+  return {
+    a: (ex * vD.y - vD.x * ey) / det,
+    b: (vR.x * ey - ex * vR.y) / det,
+  };
+}
+
+// Closed SVG path (0..100 space) of the affine image of an ellipse — naturally a
+// perspective-skewed oval under the calibrated ground basis.
+function ellipsePath(pin: V2, vR: V2, vD: V2, wx: number, wd: number, steps = 48): string {
+  let d = "";
+  for (let i = 0; i <= steps; i++) {
+    const t = (i / steps) * Math.PI * 2;
+    const a = Math.cos(t) * wx;
+    const b = Math.sin(t) * wd;
+    const x = (pin.x + a * vR.x + b * vD.x) * 100;
+    const y = (pin.y + a * vR.y + b * vD.y) * 100;
+    d += `${i === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)} `;
+  }
+  return d + "Z";
 }
 
 export default function ApproachPage() {
@@ -84,8 +124,10 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
 
   // Detector state (refs so the rAF loop reads latest values).
   const measuringRef = useRef(false);
-  const targetRef = useRef<{ x: number; y: number } | null>(null);
-  const r1mRef = useRef(0.13);
+  const pinRef = useRef<V2 | null>(null);
+  const vRRef = useRef<V2>({ x: 0.13, y: 0 }); // screen vector for +1m to the right
+  const vDRef = useRef<V2>({ x: 0, y: 0.13 }); // screen vector for +1m toward camera
+  const shapeRef = useRef<ShapeKey>("round");
   const activeRef = useRef(false);
   const settleRef = useRef(0);
   const lastCentroidRef = useRef<{ x: number; y: number } | null>(null);
@@ -93,12 +135,29 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
 
   const [camOn, setCamOn] = useState(false);
   const [phase, setPhase] = useState<"target" | "measuring">("target");
-  const [target, setTarget] = useState<{ x: number; y: number } | null>(null);
-  const [r1m, setR1m] = useState(0.13);
+  // Three-tap ground calibration: pin → 1m toward you → 1m to the right.
+  const [pin, setPin] = useState<V2 | null>(null);
+  const [near, setNear] = useState<V2 | null>(null);
+  const [right, setRight] = useState<V2 | null>(null);
+  const [calibStep, setCalibStep] = useState<"pin" | "near" | "right" | "done">("pin");
+  const [shape, setShape] = useState<ShapeKey>("round");
   const [shots, setShots] = useState<Shot[]>([]);
   const [flash, setFlash] = useState(false);
   const [lie, setLie] = useState<LieType>("flat");
   const [distance, setDistance] = useState("20");
+
+  const calibrated = calibStep === "done" && !!pin;
+  const vR = pin && right ? { x: right.x - pin.x, y: right.y - pin.y } : vRRef.current;
+  const vD = pin && near ? { x: near.x - pin.x, y: near.y - pin.y } : vDRef.current;
+  const tol = SHAPES[shape];
+
+  // Mirror the calibration into refs the rAF detector reads.
+  useEffect(() => {
+    pinRef.current = pin;
+    vRRef.current = vR;
+    vDRef.current = vD;
+    shapeRef.current = shape;
+  }, [pin, vR.x, vR.y, vD.x, vD.y, shape]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -165,7 +224,7 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
   // 背景差分による着弾検知：動きの重心を追い、静止した瞬間の位置を着弾点とする。β。
   function detectLoop(now: number) {
     const c = diffRef.current;
-    if (c && measuringRef.current && targetRef.current) {
+    if (c && measuringRef.current && pinRef.current) {
       const cur = sampleSquare();
       const prev = prevRef.current;
       if (cur) {
@@ -196,10 +255,9 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
             if (settleRef.current > 6 && now - lastShotMsRef.current > 1500) {
               activeRef.current = false;
               const cpt = lastCentroidRef.current;
-              const tgt = targetRef.current;
-              if (cpt && tgt) {
+              if (cpt && pinRef.current) {
                 lastShotMsRef.current = now;
-                registerShot(cpt.x, cpt.y, tgt, r1mRef.current);
+                registerShot(cpt.x, cpt.y);
               }
             }
           }
@@ -210,11 +268,15 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
     rafRef.current = requestAnimationFrame(detectLoop);
   }
 
-  function registerShot(nx: number, ny: number, tgt: { x: number; y: number }, r1: number) {
-    const dx = (nx - tgt.x) / r1;
-    const dy = -(ny - tgt.y) / r1;
-    const dist = Math.hypot(dx, dy);
-    const shot: Shot = { dx: round1(dx), dy: round1(dy), zone: zoneOfDist(dist) };
+  function registerShot(nx: number, ny: number) {
+    const p = pinRef.current;
+    if (!p) return;
+    // Perspective-correct: convert the screen point to true ground meters.
+    const { a, b } = toGround({ x: nx, y: ny }, p, vRRef.current, vDRef.current);
+    const t = SHAPES[shapeRef.current];
+    const zone = zoneOfAB(a, b, t.wx, t.wd);
+    // Store dx = right(+), dy = away/long(+). b is toward camera, so dy = -b.
+    const shot: Shot = { dx: round1(a), dy: round1(-b), zone };
     setShots((s) => [...s, shot]);
     if (navigator.vibrate) navigator.vibrate(shot.zone === "out" ? 30 : 15);
     setFlash(true);
@@ -227,18 +289,41 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
     const rect = svg.getBoundingClientRect();
     const nx = (e.clientX - rect.left) / rect.width;
     const ny = (e.clientY - rect.top) / rect.height;
-    if (phase === "target") {
-      setTarget({ x: nx, y: ny });
-      targetRef.current = { x: nx, y: ny };
-    } else {
+    if (phase === "measuring") {
       // Manual fallback during measuring: tap where the ball stopped.
-      const tgt = targetRef.current;
-      if (tgt) registerShot(nx, ny, tgt, r1mRef.current);
+      registerShot(nx, ny);
+      return;
+    }
+    // Calibration taps.
+    if (calibStep === "pin") {
+      setPin({ x: nx, y: ny });
+      setNear(null);
+      setRight(null);
+      setCalibStep("near");
+    } else if (calibStep === "near") {
+      setNear({ x: nx, y: ny });
+      setCalibStep("right");
+    } else if (calibStep === "right") {
+      setRight({ x: nx, y: ny });
+      setCalibStep("done");
+    } else {
+      // done → tapping again re-places the pin (restart calibration).
+      setPin({ x: nx, y: ny });
+      setNear(null);
+      setRight(null);
+      setCalibStep("near");
     }
   }
 
+  function resetCalib() {
+    setPin(null);
+    setNear(null);
+    setRight(null);
+    setCalibStep("pin");
+  }
+
   function startMeasuring() {
-    if (!target) return;
+    if (!calibrated) return;
     measuringRef.current = true;
     activeRef.current = false;
     settleRef.current = 0;
@@ -273,9 +358,11 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
   }
 
   // overlay positions
-  const tPx = target ? { x: target.x * 100, y: target.y * 100 } : null;
+  const pinPx = pin ? { x: pin.x * 100, y: pin.y * 100 } : null;
+  // Screen position of a recorded shot: pin + dx·vRight − dy·vDepth.
   const markerPos = (s: Shot) =>
-    target ? { x: (target.x + s.dx * r1m) * 100, y: (target.y - s.dy * r1m) * 100 } : { x: 50, y: 50 };
+    pin ? { x: (pin.x + s.dx * vR.x - s.dy * vD.x) * 100, y: (pin.y + s.dx * vR.y - s.dy * vD.y) * 100 } : { x: 50, y: 50 };
+  const pt = (mx: number, my: number) => ({ x: (pin!.x + mx * vR.x + my * vD.x) * 100, y: (pin!.y + mx * vR.y + my * vD.y) * 100 });
 
   return (
     <div className="space-y-4">
@@ -290,15 +377,26 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
           />
           <svg ref={svgRef} viewBox="0 0 100 100" className="absolute inset-0 w-full h-full touch-none" onClick={onSvgTap}>
             {!camOn && <rect width="100" height="100" fill="#0c3a24" />}
-            {tPx && (
-              <>
-                <circle cx={tPx.x} cy={tPx.y} r={2 * r1m * 100} fill="#f59e0b14" stroke="#f59e0b" strokeWidth="0.6" strokeDasharray="2.5 1.8" />
-                <circle cx={tPx.x} cy={tPx.y} r={r1m * 100} fill="#22c55e1f" stroke="#22c55e" strokeWidth="0.8" />
-                <line x1={tPx.x} y1={tPx.y} x2={tPx.x} y2={tPx.y - 11} stroke="#fff" strokeWidth="0.7" />
-                <circle cx={tPx.x} cy={tPx.y - 11} r="1.6" fill="#ef4444" />
-                <circle cx={tPx.x} cy={tPx.y} r="1.3" fill="#fff" />
-              </>
-            )}
+            {pinPx && calibrated && (() => {
+              // Ground axes (depth/cross ±2m) + perspective ellipse zones.
+              const depthFar = pt(0, -2), depthNear = pt(0, 2);
+              const crossL = pt(-2, 0), crossR = pt(2, 0);
+              return (
+                <>
+                  <line x1={depthFar.x} y1={depthFar.y} x2={depthNear.x} y2={depthNear.y} stroke="#7dd3fc" strokeWidth="0.4" strokeDasharray="1.5 1.5" opacity="0.5" />
+                  <line x1={crossL.x} y1={crossL.y} x2={crossR.x} y2={crossR.y} stroke="#7dd3fc" strokeWidth="0.4" strokeDasharray="1.5 1.5" opacity="0.5" />
+                  <path d={ellipsePath(pin!, vR, vD, tol.wx * 2, tol.wd * 2)} fill="#f59e0b14" stroke="#f59e0b" strokeWidth="0.6" strokeDasharray="2.5 1.8" />
+                  <path d={ellipsePath(pin!, vR, vD, tol.wx, tol.wd)} fill="#22c55e22" stroke="#22c55e" strokeWidth="0.9" />
+                  <line x1={pinPx.x} y1={pinPx.y} x2={pinPx.x} y2={pinPx.y - 11} stroke="#fff" strokeWidth="0.7" />
+                  <circle cx={pinPx.x} cy={pinPx.y - 11} r="1.6" fill="#ef4444" />
+                  <circle cx={pinPx.x} cy={pinPx.y} r="1.3" fill="#fff" />
+                </>
+              );
+            })()}
+            {/* Calibration markers while setting up */}
+            {pin && <circle cx={pin.x * 100} cy={pin.y * 100} r="1.4" fill="#ef4444" stroke="#fff" strokeWidth="0.4" />}
+            {near && !calibrated && <circle cx={near.x * 100} cy={near.y * 100} r="1.4" fill="#22d3ee" />}
+            {right && !calibrated && <circle cx={right.x * 100} cy={right.y * 100} r="1.4" fill="#a3e635" />}
             {shots.map((s, i) => {
               const p = markerPos(s);
               return <circle key={i} cx={p.x} cy={p.y} r="1.8" fill={ZONE_COLOR[s.zone]} stroke="#0a2417" strokeWidth="0.5" />;
@@ -319,9 +417,15 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
           {camOn && (
             <div className="absolute top-2 left-2 px-3 py-1 rounded-full text-xs font-bold"
               style={{ background: phase === "measuring" ? "var(--red)" : "rgba(0,0,0,0.6)", color: "#fff" }}>
-              {phase === "target"
-                ? target ? "目標点を設定済み（タップで変更）" : "ピンの位置をタップ"
-                : flash ? "● 着弾を記録！" : "● 計測中… 着弾を自動検知"}
+              {phase === "measuring"
+                ? flash ? "● 着弾を記録！" : "● 計測中… 着弾を自動検知"
+                : calibStep === "pin"
+                  ? "① ピン（カップ）をタップ"
+                  : calibStep === "near"
+                    ? "② ピンから「手前1m」をタップ"
+                    : calibStep === "right"
+                      ? "③ ピンから「右1m」をタップ"
+                      : "較正完了（タップでピンを置き直し）"}
             </div>
           )}
           {camOn && (
@@ -338,28 +442,49 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
         </button>
       ) : phase === "target" ? (
         <>
-          <Card>
-            <div className="text-xs mb-1" style={{ color: "var(--muted)" }}>
-              1mリングの大きさを実際のグリーンに合わせる
+          <Card className="space-y-2">
+            <div className="text-xs" style={{ color: "var(--muted)" }}>
+              地面の遠近を較正：3点をタップすると、奥行きと左右の尺度をAIが算出し、手前は広く奥は狭い「3D楕円ターゲット」を表示します。
             </div>
-            <input
-              type="range"
-              min={0.05}
-              max={0.3}
-              step={0.005}
-              value={r1m}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                setR1m(v);
-                r1mRef.current = v;
-              }}
-              className="w-full"
-            />
-            <div className="text-[11px]" style={{ color: "var(--muted)" }}>
-              緑の円がピンから半径1mに見えるよう調整してください。
+            <div className="grid grid-cols-3 gap-1.5 text-center text-[11px]">
+              <div className="rounded-lg py-1.5" style={{ background: pin ? "var(--green)" : "var(--bg-soft)", color: pin ? "#03260f" : "var(--muted)" }}>
+                ① ピン
+              </div>
+              <div className="rounded-lg py-1.5" style={{ background: near ? "var(--green)" : "var(--bg-soft)", color: near ? "#03260f" : "var(--muted)" }}>
+                ② 手前1m
+              </div>
+              <div className="rounded-lg py-1.5" style={{ background: right ? "var(--green)" : "var(--bg-soft)", color: right ? "#03260f" : "var(--muted)" }}>
+                ③ 右1m
+              </div>
+            </div>
+            <button onClick={resetCalib} className="btn btn-ghost py-2 w-full text-xs">
+              ↺ 較正をやり直す
+            </button>
+          </Card>
+
+          <Card>
+            <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+              ターゲット形状（練習の狙いに合わせて選択）
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              {(Object.keys(SHAPES) as ShapeKey[]).map((k) => (
+                <button
+                  key={k}
+                  onClick={() => setShape(k)}
+                  className="rounded-lg py-2 text-[11px] leading-tight"
+                  style={{
+                    background: shape === k ? "var(--cyan)" : "var(--bg-soft)",
+                    color: shape === k ? "#04121f" : "var(--muted)",
+                    border: "1px solid var(--line)",
+                  }}
+                >
+                  {SHAPES[k].label}
+                </button>
+              ))}
             </div>
           </Card>
-          <button onClick={startMeasuring} disabled={!target} className="btn btn-primary w-full py-3.5 disabled:opacity-40">
+
+          <button onClick={startMeasuring} disabled={!calibrated} className="btn btn-primary w-full py-3.5 disabled:opacity-40">
             ▶ 計測開始（着弾を自動検知）
           </button>
         </>
