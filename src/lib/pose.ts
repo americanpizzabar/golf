@@ -107,11 +107,15 @@ export function drawSkeleton(
     ctx.beginPath();
     ctx.arc(p.x * w, p.y * h, r, 0, Math.PI * 2);
     ctx.fill();
-    // depth halo (fake-3D using z)
-    ctx.globalAlpha = 0.25;
-    ctx.beginPath();
-    ctx.arc(p.x * w, p.y * h, r + (p.z ?? 0) * -40, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+    // depth halo (fake-3D using z). Clamp the radius: arc() throws on a negative
+    // radius, which happens whenever z is positive enough (e.g. on small canvases).
+    const halo = Math.max(0, r + (p.z ?? 0) * -40);
+    if (halo > 0) {
+      ctx.globalAlpha = 0.25;
+      ctx.beginPath();
+      ctx.arc(p.x * w, p.y * h, halo, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
   }
 }
