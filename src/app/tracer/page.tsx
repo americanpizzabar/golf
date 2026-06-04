@@ -465,6 +465,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
             <Stat label="推定キャリー" value={result.carry} unit="m" accent="var(--green)" />
             <Stat label="ミート率" value={result.smash.toFixed(2)} accent="#fbbf24" />
           </div>
+          <Replay3D shape={result.shape} apex={result.apex} carry={result.carry} />
           <Card>
             <div className="text-xs" style={{ color: "var(--muted)" }}>
               推定初速 {result.ballSpeed} m/s ・ ヘッドスピード {live.headSpeed} m/s（{clubLabel(club)}）
@@ -479,6 +480,263 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
         飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（クラブ非検出のためβ）。
       </p>
     </div>
+  );
+}
+
+// ---- 3D zoom replay -------------------------------------------------------
+interface V3 {
+  x: number;
+  y: number;
+  z: number;
+}
+const sub = (a: V3, b: V3): V3 => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
+const dot3 = (a: V3, b: V3) => a.x * b.x + a.y * b.y + a.z * b.z;
+const cross = (a: V3, b: V3): V3 => ({
+  x: a.y * b.z - a.z * b.y,
+  y: a.z * b.x - a.x * b.z,
+  z: a.x * b.y - a.y * b.x,
+});
+const norm3 = (a: V3): V3 => {
+  const m = Math.hypot(a.x, a.y, a.z) || 1;
+  return { x: a.x / m, y: a.y / m, z: a.z / m };
+};
+const smooth = (t: number) => t * t * (3 - 2 * t);
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+// Reconstruct a 3D ball flight (metres) from the estimated parameters.
+function buildFlight(shape: BallShape, apex: number, carry: number) {
+  const N = 64;
+  const dirMap: Record<string, number> = { straight: 0, draw: -1, fade: 1, slice: 1, hook: -1 };
+  const magMap: Record<string, number> = { straight: 0, draw: 0.05, fade: 0.06, slice: 0.14, hook: 0.13 };
+  const dir = dirMap[shape] ?? 0;
+  const mag = (magMap[shape] ?? 0) * carry;
+  const flight: V3[] = [];
+  for (let i = 0; i <= N; i++) {
+    const u = i / N;
+    flight.push({ x: dir * mag * Math.pow(u, 1.8), y: 4 * apex * u * (1 - u), z: carry * u });
+  }
+  const landing = flight[flight.length - 1];
+  const prev = flight[flight.length - 3];
+  let dx = landing.x - prev.x;
+  let dz = landing.z - prev.z;
+  const dl = Math.hypot(dx, dz) || 1;
+  dx /= dl;
+  dz /= dl;
+  const rollLen = Math.max(2, carry * 0.07);
+  const roll: V3[] = [];
+  const Rn = 12;
+  for (let i = 1; i <= Rn; i++) {
+    const u = i / Rn;
+    roll.push({ x: landing.x + dx * rollLen * u, y: 0, z: landing.z + dz * rollLen * u });
+  }
+  return { flight, roll, landing: roll[roll.length - 1] };
+}
+
+// Cinematic camera: tee-behind → drone 3/4 → pin-side → overhead-on-landing.
+function cameraAt(t: number, mid: V3, landing: V3, carry: number) {
+  const keys = [
+    { t: 0, tgt: { x: 0, y: Math.max(2, mid.y * 0.3), z: carry * 0.12 }, yaw: 0, pitch: 0.14, dist: carry * 0.38 },
+    { t: 0.4, tgt: mid, yaw: -0.55, pitch: 0.66, dist: carry * 0.95 },
+    { t: 0.72, tgt: landing, yaw: 2.7, pitch: 0.38, dist: carry * 0.55 },
+    { t: 1, tgt: landing, yaw: 3.5, pitch: 0.95, dist: carry * 0.5 },
+  ];
+  let k = 0;
+  while (k < keys.length - 2 && t > keys[k + 1].t) k++;
+  const a = keys[k];
+  const b = keys[k + 1];
+  const u = smooth(Math.max(0, Math.min(1, (t - a.t) / (b.t - a.t || 1))));
+  return {
+    target: { x: lerp(a.tgt.x, b.tgt.x, u), y: lerp(a.tgt.y, b.tgt.y, u), z: lerp(a.tgt.z, b.tgt.z, u) },
+    yaw: lerp(a.yaw, b.yaw, u),
+    pitch: lerp(a.pitch, b.pitch, u),
+    dist: lerp(a.dist, b.dist, u),
+  };
+}
+
+function Replay3D({ shape, apex, carry }: { shape: BallShape; apex: number; carry: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rafRef = useRef(0);
+  const tRef = useRef(0);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    const { flight, roll, landing } = buildFlight(shape, apex, carry);
+    const mid: V3 = { x: flight[Math.floor(flight.length * 0.5)].x, y: apex * 0.6, z: carry * 0.5 };
+    const col = shapeColor(shape);
+    const DURATION = 5;
+    const focal = H * 0.95;
+
+    const proj = (p: V3, cam: ReturnType<typeof cameraAt>) => {
+      const cp = Math.cos(cam.pitch);
+      const sp = Math.sin(cam.pitch);
+      const cyaw = Math.cos(cam.yaw);
+      const syaw = Math.sin(cam.yaw);
+      const camPos: V3 = {
+        x: cam.target.x + cam.dist * cp * syaw,
+        y: cam.target.y + cam.dist * sp,
+        z: cam.target.z - cam.dist * cp * cyaw,
+      };
+      const f = norm3(sub(cam.target, camPos));
+      const r = norm3(cross(f, { x: 0, y: 1, z: 0 }));
+      const up = cross(r, f);
+      const v = sub(p, camPos);
+      const cz = dot3(v, f);
+      if (cz <= 0.05) return null;
+      return { x: W / 2 + (dot3(v, r) / cz) * focal, y: H / 2 - (dot3(v, up) / cz) * focal };
+    };
+
+    tRef.current = 0;
+    let last = performance.now();
+    const render = (now: number) => {
+      const dt = (now - last) / 1000;
+      last = now;
+      tRef.current = Math.min(1, tRef.current + dt / DURATION);
+      const t = tRef.current;
+      const cam = cameraAt(t, mid, landing, carry);
+
+      const sky = ctx.createLinearGradient(0, 0, 0, H);
+      sky.addColorStop(0, "#0b2545");
+      sky.addColorStop(1, "#11324f");
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, W, H);
+
+      const gw = Math.max(8, Math.abs(landing.x) + 6);
+      const gz = Math.max(5, Math.round(carry / 8));
+      ctx.strokeStyle = "rgba(120,190,150,0.25)";
+      ctx.lineWidth = 1;
+      for (let z = 0; z <= carry + 1; z += gz) {
+        const p1 = proj({ x: -gw, y: 0, z }, cam);
+        const p2 = proj({ x: gw, y: 0, z }, cam);
+        if (p1 && p2) { ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke(); }
+      }
+      for (let x = -gw; x <= gw + 1; x += gz) {
+        const p1 = proj({ x, y: 0, z: 0 }, cam);
+        const p2 = proj({ x, y: 0, z: carry }, cam);
+        if (p1 && p2) { ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke(); }
+      }
+
+      for (const [rad, color] of [[2, "rgba(245,158,11,0.8)"], [1, "rgba(34,197,94,0.95)"]] as const) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i <= 28; i++) {
+          const a = (i / 28) * Math.PI * 2;
+          const pp = proj({ x: landing.x + Math.cos(a) * rad, y: 0, z: landing.z + Math.sin(a) * rad }, cam);
+          if (!pp) { started = false; continue; }
+          if (!started) { ctx.moveTo(pp.x, pp.y); started = true; } else ctx.lineTo(pp.x, pp.y);
+        }
+        ctx.stroke();
+      }
+
+      let ballPos: V3;
+      let flightFrac: number;
+      if (t < 0.62) {
+        flightFrac = t / 0.62;
+        const fi = flightFrac * (flight.length - 1);
+        const lo = Math.floor(fi);
+        const hi = Math.min(flight.length - 1, lo + 1);
+        const u = fi - lo;
+        ballPos = { x: lerp(flight[lo].x, flight[hi].x, u), y: lerp(flight[lo].y, flight[hi].y, u), z: lerp(flight[lo].z, flight[hi].z, u) };
+      } else {
+        flightFrac = 1;
+        const ri = Math.min(1, (t - 0.62) / 0.1) * (roll.length - 1);
+        const lo = Math.floor(ri);
+        const hi = Math.min(roll.length - 1, lo + 1);
+        const u = ri - lo;
+        ballPos = { x: lerp(roll[lo].x, roll[hi].x, u), y: 0, z: lerp(roll[lo].z, roll[hi].z, u) };
+      }
+
+      ctx.strokeStyle = "rgba(255,255,255,0.18)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      let st = false;
+      for (const p of flight) {
+        const pp = proj(p, cam);
+        if (!pp) { st = false; continue; }
+        if (!st) { ctx.moveTo(pp.x, pp.y); st = true; } else ctx.lineTo(pp.x, pp.y);
+      }
+      ctx.stroke();
+
+      const upto = Math.max(1, Math.floor(flightFrac * (flight.length - 1)));
+      ctx.save();
+      ctx.shadowBlur = 12;
+      ctx.shadowColor = col;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 3;
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      st = false;
+      for (let i = 0; i <= upto; i++) {
+        const pp = proj(flight[i], cam);
+        if (!pp) { st = false; continue; }
+        if (!st) { ctx.moveTo(pp.x, pp.y); st = true; } else ctx.lineTo(pp.x, pp.y);
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      const sh = proj({ x: ballPos.x, y: 0, z: ballPos.z }, cam);
+      if (sh) {
+        ctx.fillStyle = "rgba(0,0,0,0.35)";
+        ctx.beginPath();
+        ctx.ellipse(sh.x, sh.y, 5, 2.2, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      const bp = proj(ballPos, cam);
+      if (bp) {
+        ctx.save();
+        ctx.shadowBlur = 14;
+        ctx.shadowColor = "#fff";
+        ctx.fillStyle = "#fff";
+        ctx.beginPath();
+        ctx.arc(bp.x, bp.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      const apexPt = flight[Math.round(flight.length * 0.5)];
+      const ap = proj({ ...apexPt, y: apex }, cam);
+      if (ap && t > 0.3) {
+        ctx.fillStyle = "#22d3ee";
+        ctx.font = "bold 12px system-ui";
+        ctx.textAlign = "center";
+        ctx.fillText(`最高到達点 ${apex}m`, ap.x, ap.y - 8);
+      }
+      const lp = proj({ ...landing, y: 0 }, cam);
+      if (lp && t > 0.55) {
+        ctx.fillStyle = "#22c55e";
+        ctx.font = "bold 12px system-ui";
+        ctx.textAlign = "center";
+        ctx.fillText(`${carry}m`, lp.x, lp.y + 16);
+      }
+
+      if (t < 1) rafRef.current = requestAnimationFrame(render);
+    };
+    rafRef.current = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [shape, apex, carry, nonce]);
+
+  return (
+    <Card className="p-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs font-bold">🎬 3Dズーム・リプレイ</div>
+        <button onClick={() => setNonce((n) => n + 1)} className="btn btn-ghost text-xs px-3 py-1">
+          🔄 もう一度
+        </button>
+      </div>
+      <div className="rounded-xl overflow-hidden" style={{ border: "1px solid var(--line)" }}>
+        <canvas ref={canvasRef} width={340} height={300} className="w-full block" />
+      </div>
+      <p className="text-[10px] mt-2" style={{ color: "var(--muted)" }}>
+        仮想カメラが打席後方→上空→ピン側へ回り込み、推定した3D弾道（放物線・着弾・転がり）を再現します。
+        弾道は計測した球筋とクラブ推定値からの再構成です（β）。
+      </p>
+    </Card>
   );
 }
 
