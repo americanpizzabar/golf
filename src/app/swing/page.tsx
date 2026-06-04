@@ -563,14 +563,17 @@ export default function SwingPage() {
     setNotice("");
     setScanPct(0);
 
-    // When zoomed, detect on the cropped+upscaled region (helps small/distant
-    // subjects), then map landmarks back to full-frame coords so the rest of the
-    // pipeline and the overlay (which is also zoom-transformed) stay consistent.
+    // Detection input is ALWAYS rendered to a small, capped-resolution offscreen
+    // canvas (long side ≤ TARGET). This keeps memory/CPU bounded on phones with
+    // high-res (1080p/4K) clips — feeding full-res frames every tick can OOM and
+    // crash the tab. When zoomed we crop first, which also enlarges a small/distant
+    // subject within the detection canvas. Landmarks come back normalized, so the
+    // canvas pixel size is irrelevant to coordinates.
     const z = uZoom;
     const px = pan.x;
     const py = pan.y;
-    const cropSource = (): HTMLVideoElement | HTMLCanvasElement => {
-      if (z <= 1) return video;
+    const TARGET = 540;
+    const detectSource = (): HTMLCanvasElement => {
       let cc = cropCanvasRef.current;
       if (!cc) {
         cc = document.createElement("canvas");
@@ -578,12 +581,19 @@ export default function SwingPage() {
       }
       const vw = video.videoWidth;
       const vh = video.videoHeight;
-      if (cc.width !== vw) {
-        cc.width = vw;
-        cc.height = vh;
+      const sw = z > 1 ? vw / z : vw;
+      const sh = z > 1 ? vh / z : vh;
+      const sx = z > 1 ? px * vw : 0;
+      const sy = z > 1 ? py * vh : 0;
+      const scale = TARGET / Math.max(sw, sh);
+      const dw = Math.max(1, Math.round(sw * scale));
+      const dh = Math.max(1, Math.round(sh * scale));
+      if (cc.width !== dw || cc.height !== dh) {
+        cc.width = dw;
+        cc.height = dh;
       }
       const cx = cc.getContext("2d");
-      if (cx) cx.drawImage(video, px * vw, py * vh, vw / z, vh / z, 0, 0, vw, vh);
+      if (cx) cx.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh);
       return cc;
     };
     const mapPose = (pose: Frame): Frame =>
@@ -624,6 +634,9 @@ export default function SwingPage() {
     });
 
     const frames: Frame[] = [];
+    const MAX_FRAMES = 140; // hard cap on detections (bounds work on long clips)
+    const MIN_DT = 0.028; // process at most ~35 fps of media time
+    let lastProc = -1;
     video.muted = true;
     video.playbackRate = 0.6; // slow → more samples per frame of swing
     await video.play().catch(() => {});
@@ -646,12 +659,14 @@ export default function SwingPage() {
       const grab = () => {
         if (stopped) return;
         const t = video.currentTime;
-        if (video.ended || video.paused || t >= end) return stop();
-        if (t >= start - 0.06 && video.readyState >= 2 && video.videoWidth) {
+        if (video.ended || video.paused || t >= end || frames.length >= MAX_FRAMES) return stop();
+        // Throttle by media time so frame rate / device speed don't change the load.
+        if (t >= start - 0.06 && t - lastProc >= MIN_DT && video.readyState >= 2 && video.videoWidth) {
+          lastProc = t;
           try {
             const ts = Math.max(performance.now(), lastTsRef.current + 1);
             lastTsRef.current = ts;
-            const res = model.detectForVideo(cropSource(), ts);
+            const res = model.detectForVideo(detectSource(), ts);
             const raw = res.landmarks?.[0] as Frame | undefined;
             if (raw) {
               const pose = mapPose(raw);
