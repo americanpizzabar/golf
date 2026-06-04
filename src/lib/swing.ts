@@ -327,7 +327,7 @@ function avg(arr: number[]) {
 
 // Downsample a swing's frames to a compact flat-array sequence for storage
 // (ghost overlay / replay). Keeps x,y for all 33 landmarks.
-export function compactFrames(frames: Frame[], max = 30): number[][] {
+export function compactFrames(frames: Frame[], max = 45): number[][] {
   if (!frames.length) return [];
   const n = Math.min(max, frames.length);
   const out: number[][] = [];

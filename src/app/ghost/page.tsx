@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   LineChart,
@@ -10,17 +10,29 @@ import {
   ResponsiveContainer,
   Tooltip,
   Legend,
+  ReferenceLine,
 } from "recharts";
 import { PageHeader, Card, Spinner } from "@/components/ui";
 import { drawSkeleton, LM, type Frame } from "@/lib/pose";
-import { expandFrame, wristSpeedSeries } from "@/lib/swing";
 import { generateModelSwing } from "@/lib/model-swing";
+import {
+  EVENT_NAMES,
+  EVENT_PHASES,
+  detectEvents,
+  interpFrame,
+  phaseToFrame,
+  phaseEventName,
+  jointDeviations,
+  kinematics,
+  sequenceVerdict,
+  type JointDeviation,
+} from "@/lib/ghost-sync";
 import { fetchSwings, getProfile, fetchPros } from "@/lib/db";
 import type { Swing, Pro } from "@/lib/types";
 
 export default function GhostPage() {
-  const [swings, setSwings] = useState<Swing[]>([]); // real swings (A choices)
-  const [model, setModel] = useState<Swing | null>(null); // synthetic pro model
+  const [swings, setSwings] = useState<Swing[]>([]);
+  const [model, setModel] = useState<Swing | null>(null);
   const [leftHanded, setLeftHanded] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [aId, setAId] = useState("");
@@ -33,12 +45,9 @@ export default function GhostPage() {
       setLeftHanded(lh);
       const withFrames = sw.filter((s) => s.pose_frames && s.pose_frames.length > 4);
       setSwings(withFrames);
-      // Build an idealized "model" ghost from a reference pro so a comparison is
-      // possible even with a single recorded swing. The model is right-handed;
-      // mirror it for left-handed players so it overlaps the user's swing.
       const pro: Pro | undefined = pros.find((x) => x.name.includes("マキロイ")) ?? pros[0];
       if (pro) {
-        let mf = generateModelSwing(pro);
+        let mf = generateModelSwing(pro, 45);
         if (lh) mf = mf.map((f) => f.map((v, i) => (i % 2 === 0 ? 1 - v : v)));
         setModel({
           id: "model",
@@ -65,7 +74,7 @@ export default function GhostPage() {
 
   return (
     <main>
-      <PageHeader title="ゴースト比較" subtitle="ベストスイングと重ねて加速を可視化" back />
+      <PageHeader title="ゴースト・フレーム同期" subtitle="8イベントで完全同期・関節ズレを可視化" back />
       <div className="px-4 space-y-4">
         {!loaded ? (
           <Card className="text-center py-8"><Spinner label="読み込み中…" /></Card>
@@ -100,8 +109,13 @@ export default function GhostPage() {
 
             {a && b && (
               <>
-                <GhostPlayer a={a.pose_frames!} b={b.pose_frames!} />
-                <SpeedTimeline a={a} b={b} leftHanded={leftHanded} />
+                <SyncPlayer
+                  key={`${a.id}-${b.id}`}
+                  a={a.pose_frames!}
+                  b={b.pose_frames!}
+                  leftHanded={leftHanded}
+                />
+                <KinematicSequence frames={a.pose_frames!} leftHanded={leftHanded} />
               </>
             )}
           </>
@@ -117,123 +131,277 @@ function label(s: Swing) {
   return `${d}・${s.sync_rate ?? "—"}%${s.head_speed ? `・${s.head_speed}m/s` : ""}`;
 }
 
-// Per-swing transform so both golfers are centered & same size when overlaid.
-function transformOf(frames: number[][]) {
-  const f0 = expandFrame(frames[0]);
-  const midHip = { x: (f0[LM.lHip].x + f0[LM.rHip].x) / 2, y: (f0[LM.lHip].y + f0[LM.rHip].y) / 2 };
-  const ankle = (f0[LM.lAnkle].y + f0[LM.rAnkle].y) / 2;
-  const bodyH = Math.abs(ankle - f0[LM.nose].y) || 0.5;
+// Build a per-swing transform (centre + same body height) for overlay, working
+// directly on flat frames and returning a drawable Frame.
+function makeTransform(frames: number[][]) {
+  const f0 = frames[0];
+  const midX = (f0[LM.lHip * 2] + f0[LM.rHip * 2]) / 2;
+  const midY = (f0[LM.lHip * 2 + 1] + f0[LM.rHip * 2 + 1]) / 2;
+  const ankleY = (f0[LM.lAnkle * 2 + 1] + f0[LM.rAnkle * 2 + 1]) / 2;
+  const bodyH = Math.abs(ankleY - f0[LM.nose * 2 + 1]) || 0.5;
   const scale = 0.55 / bodyH;
-  return (frame: Frame): Frame =>
-    frame.map((p) => ({ ...p, x: 0.5 + (p.x - midHip.x) * scale, y: 0.62 + (p.y - midHip.y) * scale }));
+  return (flat: number[]): Frame => {
+    const out: Frame = [];
+    for (let i = 0; i < 33; i++) {
+      out.push({ x: 0.5 + (flat[i * 2] - midX) * scale, y: 0.62 + (flat[i * 2 + 1] - midY) * scale, z: 0, visibility: 1 });
+    }
+    return out;
+  };
 }
 
-function GhostPlayer({ a, b }: { a: number[][]; b: number[][] }) {
+const SPEEDS = [
+  { label: "x0.25", dur: 6 },
+  { label: "x0.5", dur: 3 },
+  { label: "x1", dur: 1.5 },
+];
+
+function SyncPlayer({ a, b, leftHanded }: { a: number[][]; b: number[][]; leftHanded: boolean }) {
+  const SIZE = 360;
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [t, setT] = useState(0);
-  const [playing, setPlaying] = useState(true);
   const rafRef = useRef(0);
-  const tRef = useRef(0);
+  const phaseRef = useRef(0);
+  const playingRef = useRef(true);
+  const lastUIRef = useRef(0);
+  const durRef = useRef(SPEEDS[1].dur);
 
-  const txA = transformOf(a);
-  const txB = transformOf(b);
+  const [phase, setPhase] = useState(0);
+  const [playing, setPlaying] = useState(true);
+  const [speedI, setSpeedI] = useState(1);
+  const [alerts, setAlerts] = useState<JointDeviation[]>([]);
 
-  useEffect(() => {
-    const SIZE = 360;
-    const c = canvasRef.current;
-    if (!c) return;
-    const ctx = c.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, SIZE, SIZE);
-    const ia = Math.round(t * (a.length - 1));
-    const ib = Math.round(t * (b.length - 1));
-    // ghost (B) behind, translucent
-    ctx.globalAlpha = 0.45;
-    drawSkeleton(ctx, txB(expandFrame(b[ib])), SIZE, SIZE, "#f59e0b");
-    ctx.globalAlpha = 1;
-    drawSkeleton(ctx, txA(expandFrame(a[ia])), SIZE, SIZE, "#22d3ee");
-  }, [t, a, b, txA, txB]);
+  const eventsA = useMemo(() => detectEvents(a, leftHanded), [a, leftHanded]);
+  const eventsB = useMemo(() => detectEvents(b, leftHanded), [b, leftHanded]);
+  const txA = useMemo(() => makeTransform(a), [a]);
+  const txB = useMemo(() => makeTransform(b), [b]);
 
   useEffect(() => {
-    if (!playing) {
-      cancelAnimationFrame(rafRef.current);
-      return;
-    }
+    playingRef.current = playing;
+  }, [playing]);
+  useEffect(() => {
+    durRef.current = SPEEDS[speedI].dur;
+  }, [speedI]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
     let last = performance.now();
-    const step = (now: number) => {
+    const loop = (now: number) => {
       const dt = (now - last) / 1000;
       last = now;
-      tRef.current = (tRef.current + dt / 2) % 1; // ~2s loop
-      setT(tRef.current);
-      rafRef.current = requestAnimationFrame(step);
+      if (playingRef.current) {
+        phaseRef.current += dt / durRef.current;
+        if (phaseRef.current >= 1) phaseRef.current = 0;
+      }
+      const ph = phaseRef.current;
+      const fa = interpFrame(a, phaseToFrame(eventsA, ph));
+      const fb = interpFrame(b, phaseToFrame(eventsB, ph));
+      const TA = txA(fa);
+      const TB = txB(fb);
+      ctx.clearRect(0, 0, SIZE, SIZE);
+      ctx.globalAlpha = 0.5;
+      drawSkeleton(ctx, TB, SIZE, SIZE, "#f59e0b");
+      ctx.globalAlpha = 1;
+      drawSkeleton(ctx, TA, SIZE, SIZE, "#22d3ee");
+
+      // Joint-deviation heat-map: flash the joints that differ from the ghost.
+      const devs = jointDeviations(fa, fb);
+      const flash = 0.5 + 0.5 * Math.sin(now / 110);
+      for (const d of devs) {
+        const p = TA[d.vertex];
+        const x = p.x * SIZE;
+        const y = p.y * SIZE;
+        ctx.fillStyle = `rgba(244,63,94,${0.25 + 0.4 * flash})`;
+        ctx.beginPath();
+        ctx.arc(x, y, 13, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = `rgba(244,63,94,${0.7 + 0.3 * flash})`;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(x, y, 13, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // Throttle React state updates (~18fps) to keep the UI light.
+      if (now - lastUIRef.current > 55) {
+        lastUIRef.current = now;
+        setPhase(ph);
+        setAlerts(devs);
+      }
+      rafRef.current = requestAnimationFrame(loop);
     };
-    rafRef.current = requestAnimationFrame(step);
+    rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [playing]);
+  }, [a, b, eventsA, eventsB, txA, txB]);
+
+  const seek = (p: number) => {
+    phaseRef.current = Math.max(0, Math.min(1, p));
+    setPhase(phaseRef.current);
+  };
+  const stepDelta = 1 / Math.max(8, Math.max(a.length, b.length) - 1);
 
   return (
     <Card className="p-3">
-      <div className="rounded-xl overflow-hidden mx-auto" style={{ background: "#0b1220", border: "1px solid var(--line)", maxWidth: 360 }}>
-        <canvas ref={canvasRef} width={360} height={360} className="w-full" />
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs font-bold" style={{ color: "var(--fg)" }}>
+          {phaseEventName(phase)}
+        </div>
+        <div className="flex gap-1">
+          {SPEEDS.map((s, i) => (
+            <button
+              key={s.label}
+              onClick={() => setSpeedI(i)}
+              className="px-2 py-0.5 rounded text-[11px]"
+              style={{
+                background: speedI === i ? "var(--green)" : "var(--bg-soft)",
+                color: speedI === i ? "#03260f" : "var(--muted)",
+              }}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="flex items-center gap-3 mt-3">
-        <button onClick={() => setPlaying((p) => !p)} className="btn btn-ghost px-4 py-2 text-sm">
+
+      <div className="rounded-xl overflow-hidden mx-auto" style={{ background: "#0b1220", border: "1px solid var(--line)", maxWidth: 360 }}>
+        <canvas ref={canvasRef} width={SIZE} height={SIZE} className="w-full" />
+      </div>
+
+      {/* Transport */}
+      <div className="flex items-center gap-2 mt-3">
+        <button
+          onClick={() => { setPlaying(false); seek(phaseRef.current - stepDelta); }}
+          className="btn btn-ghost w-9 h-9 grid place-items-center"
+          aria-label="1コマ戻る"
+        >
+          ◀
+        </button>
+        <button
+          onClick={() => setPlaying((p) => !p)}
+          className="btn btn-ghost w-10 h-9 grid place-items-center text-sm"
+        >
           {playing ? "⏸" : "▶"}
+        </button>
+        <button
+          onClick={() => { setPlaying(false); seek(phaseRef.current + stepDelta); }}
+          className="btn btn-ghost w-9 h-9 grid place-items-center"
+          aria-label="1コマ進む"
+        >
+          ▶|
         </button>
         <input
           type="range"
           min={0}
           max={1}
-          step={0.01}
-          value={t}
-          onChange={(e) => {
-            setPlaying(false);
-            tRef.current = Number(e.target.value);
-            setT(tRef.current);
-          }}
+          step={0.002}
+          value={phase}
+          onChange={(e) => { setPlaying(false); seek(Number(e.target.value)); }}
           className="flex-1"
         />
-        <span className="text-xs w-20 text-right" style={{ color: "var(--muted)" }}>
-          {t < 0.33 ? "始動〜トップ" : t < 0.6 ? "ダウン" : t < 0.75 ? "インパクト" : "フォロー"}
-        </span>
       </div>
+
+      {/* Event jump chips */}
+      <div className="grid grid-cols-4 gap-1 mt-2">
+        {EVENT_NAMES.map((name, i) => {
+          const active = phaseEventName(phase) === name;
+          return (
+            <button
+              key={name}
+              onClick={() => { setPlaying(false); seek(EVENT_PHASES[i]); }}
+              className="px-1 py-1.5 rounded text-[10px] leading-tight"
+              style={{
+                background: active ? "var(--cyan)" : "var(--bg-soft)",
+                color: active ? "#04121f" : "var(--muted)",
+              }}
+            >
+              {name}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Heat-map readout */}
+      <div className="mt-3">
+        <div className="text-[11px] mb-1" style={{ color: "var(--muted)" }}>
+          関節ズレ（この局面で お手本 とズレている部位）
+        </div>
+        {alerts.length === 0 ? (
+          <div className="text-xs" style={{ color: "var(--green)" }}>✓ 大きなズレはありません</div>
+        ) : (
+          <div className="space-y-1">
+            {alerts.slice(0, 3).map((d) => (
+              <div key={d.name} className="flex items-center justify-between text-xs">
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block w-2 h-2 rounded-full" style={{ background: "#f43f5e" }} />
+                  {d.name}
+                </span>
+                <span style={{ color: "var(--muted)" }}>
+                  あなた<span style={{ color: "var(--fg)" }}>{d.you}°</span> / お手本{d.ref}°（差{Math.round(d.diff)}°）
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <p className="text-[10px] mt-2" style={{ color: "var(--muted)" }}>
+        8つの骨格イベントで再生速度を自動同期。スライダーや◀▶で1コマずつ重ね合わせて確認できます。
+        ズレ判定は2D骨格からの推定です。
+      </p>
     </Card>
   );
 }
 
-function SpeedTimeline({ a, b, leftHanded }: { a: Swing; b: Swing; leftHanded: boolean }) {
-  const sa = wristSpeedSeries(a.pose_frames!, leftHanded);
-  const sb = wristSpeedSeries(b.pose_frames!, leftHanded);
-  const maxV = Math.max(0.0001, ...sa, ...sb);
-  const N = 24;
-  const sample = (s: number[], u: number) => (s.length ? s[Math.round(u * (s.length - 1))] : 0);
-  const data = Array.from({ length: N }, (_, i) => {
-    const u = i / (N - 1);
-    return {
-      p: Math.round(u * 100),
-      now: Math.round((sample(sa, u) / maxV) * 100),
-      ghost: Math.round((sample(sb, u) / maxV) * 100),
+function KinematicSequence({ frames, leftHanded }: { frames: number[][]; leftHanded: boolean }) {
+  const { data, verdict, impactPct } = useMemo(() => {
+    const k = kinematics(frames, leftHanded);
+    const ev = detectEvents(frames, leftHanded);
+    const norm = (arr: number[]) => {
+      const mx = Math.max(1e-6, ...arr);
+      return arr.map((v) => (v / mx) * 100);
     };
-  });
+    const np = norm(k.pelvis);
+    const nt = norm(k.thorax);
+    const na = norm(k.arm);
+    const n = k.pelvis.length;
+    const d = Array.from({ length: n }, (_, i) => ({
+      p: Math.round((i / Math.max(1, n - 1)) * 100),
+      pelvis: Math.round(np[i]),
+      thorax: Math.round(nt[i]),
+      arm: Math.round(na[i]),
+    }));
+    return {
+      data: d,
+      verdict: sequenceVerdict(k, ev),
+      impactPct: Math.round((ev[5] / Math.max(1, frames.length - 1)) * 100),
+    };
+  }, [frames, leftHanded]);
 
   return (
     <Card>
       <div className="text-xs mb-1" style={{ color: "var(--muted)" }}>
-        手元スピードの加速プロセス（スイング進行 % ／ 相対スピード）
+        キネマティック・シーケンス（加速の順番）
       </div>
-      <p className="text-[11px] mb-2" style={{ color: "var(--muted)" }}>
-        ピークがインパクト直前で、その後に減速していれば効率よく加速できています。
-      </p>
+      <div className="text-sm mb-2">
+        加速順: <span className="font-bold">{verdict.order.join(" → ")}</span>{" "}
+        <span style={{ color: verdict.good ? "var(--green)" : "var(--amber)" }}>
+          {verdict.good ? "✓ 効率の良い連鎖" : "腕が先行＝手打ち傾向"}
+        </span>
+      </div>
       <ResponsiveContainer width="100%" height={200}>
-        <LineChart data={data} margin={{ top: 8, right: 12, left: -20, bottom: 0 }}>
+        <LineChart data={data} margin={{ top: 8, right: 12, left: -22, bottom: 0 }}>
           <XAxis dataKey="p" unit="%" tick={{ fill: "#93a4bf", fontSize: 10 }} axisLine={false} tickLine={false} />
           <YAxis tick={{ fill: "#93a4bf", fontSize: 10 }} axisLine={false} tickLine={false} />
           <Tooltip contentStyle={{ background: "#16233a", border: "1px solid #243651", borderRadius: 12, fontSize: 12 }} />
           <Legend wrapperStyle={{ fontSize: 11 }} />
-          <Line type="monotone" dataKey="now" name="現在" stroke="#22d3ee" strokeWidth={3} dot={false} />
-          <Line type="monotone" dataKey="ghost" name="ゴースト" stroke="#f59e0b" strokeWidth={2.5} strokeDasharray="5 4" dot={false} />
+          <ReferenceLine x={impactPct} stroke="#f43f5e" strokeDasharray="3 3" label={{ value: "IMP", fill: "#f43f5e", fontSize: 10 }} />
+          <Line type="monotone" dataKey="pelvis" name="骨盤" stroke="#22c55e" strokeWidth={2.5} dot={false} />
+          <Line type="monotone" dataKey="thorax" name="胸郭" stroke="#22d3ee" strokeWidth={2.5} dot={false} />
+          <Line type="monotone" dataKey="arm" name="腕" stroke="#f59e0b" strokeWidth={2.5} dot={false} />
         </LineChart>
       </ResponsiveContainer>
+      <p className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
+        プロは「骨盤→胸郭→腕」の順にピークが現れます。各線は自分の最大値で正規化したピークタイミングです。
+      </p>
     </Card>
   );
 }
