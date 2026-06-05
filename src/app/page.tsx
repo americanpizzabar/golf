@@ -173,6 +173,13 @@ export default function Home() {
             accent="#a78bfa"
           />
           <LinkCard
+            href="/silhouette"
+            icon="👤"
+            title="シースルー・シルエット"
+            desc="プロの輪郭と重ねてハミ出しを可視化"
+            accent="#f59e0b"
+          />
+          <LinkCard
             href="/match"
             icon="🤝"
             title="一期一会ラウンド（対戦）"

@@ -80,6 +80,42 @@ export async function getPoseLandmarker(): Promise<PoseLandmarker> {
   return landmarkerPromise;
 }
 
+// Separate instance that also outputs a person segmentation mask (for the
+// see-through silhouette). Kept separate so normal detection isn't slowed by the
+// extra mask work.
+let segPromise: Promise<PoseLandmarker> | null = null;
+export async function getSegLandmarker(): Promise<PoseLandmarker> {
+  if (!segPromise) {
+    segPromise = (async () => {
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm",
+      );
+      const opts = (delegate: "GPU" | "CPU") => ({
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+          delegate,
+        },
+        runningMode: "VIDEO" as const,
+        numPoses: 1,
+        outputSegmentationMasks: true,
+        minPoseDetectionConfidence: 0.5,
+        minPosePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+      try {
+        return await PoseLandmarker.createFromOptions(vision, opts("GPU"));
+      } catch {
+        return await PoseLandmarker.createFromOptions(vision, opts("CPU"));
+      }
+    })();
+    segPromise.catch(() => {
+      segPromise = null;
+    });
+  }
+  return segPromise;
+}
+
 // Draw a 3D-looking wireframe of the skeleton onto a canvas.
 export function drawSkeleton(
   ctx: CanvasRenderingContext2D,

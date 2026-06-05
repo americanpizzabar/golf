@@ -14,7 +14,7 @@ import {
 } from "recharts";
 import { PageHeader, Card, Spinner } from "@/components/ui";
 import { drawSkeleton, LM, type Frame } from "@/lib/pose";
-import { generateModelSwing } from "@/lib/model-swing";
+import { generateModelSwing, generateModelSwingDTL } from "@/lib/model-swing";
 import {
   EVENT_NAMES,
   EVENT_PHASES,
@@ -36,6 +36,7 @@ import type { Swing, Pro } from "@/lib/types";
 export default function GhostPage() {
   const [swings, setSwings] = useState<Swing[]>([]);
   const [model, setModel] = useState<Swing | null>(null);
+  const [modelDtl, setModelDtl] = useState<number[][] | null>(null);
   const [leftHanded, setLeftHanded] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [aId, setAId] = useState("");
@@ -50,8 +51,10 @@ export default function GhostPage() {
       setSwings(withFrames);
       const pro: Pro | undefined = pros.find((x) => x.name.includes("マキロイ")) ?? pros[0];
       if (pro) {
-        let mf = generateModelSwing(pro, 45);
-        if (lh) mf = mf.map((f) => f.map((v, i) => (i % 2 === 0 ? 1 - v : v)));
+        const mirror = (frames: number[][]) =>
+          lh ? frames.map((f) => f.map((v, i) => (i % 2 === 0 ? 1 - v : v))) : frames;
+        const mf = mirror(generateModelSwing(pro, 45));
+        setModelDtl(mirror(generateModelSwingDTL(pro, 45)));
         setModel({
           id: "model",
           device_id: "",
@@ -79,6 +82,9 @@ export default function GhostPage() {
   const [angleOverride, setAngleOverride] = useState<ViewAngle | null>(null);
   const autoAngle: ViewAngle = a ? detectAngle(a.pose_frames!) : "front";
   const angle: ViewAngle = angleOverride ?? autoAngle;
+  // The model ghost uses its front or DTL variant to match the detected angle.
+  const bFrames =
+    b?.id === "model" && angle === "dtl" && modelDtl ? modelDtl : b?.pose_frames ?? null;
 
   return (
     <main>
@@ -145,12 +151,12 @@ export default function GhostPage() {
               </div>
             </Card>
 
-            {a && b && (
+            {a && b && bFrames && (
               <>
                 <SyncPlayer
                   key={`${a.id}-${b.id}-${angle}`}
                   a={a.pose_frames!}
-                  b={b.pose_frames!}
+                  b={bFrames}
                   leftHanded={leftHanded}
                   angle={angle}
                 />

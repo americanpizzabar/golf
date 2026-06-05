@@ -102,3 +102,65 @@ export function generateModelSwing(pro: Pro, n = 30): number[][] {
   }
   return frames;
 }
+
+// Down-the-Line (side-on) reference. Profile posture with forward spine tilt and
+// the hands tracing a tilted swing-plane arc. Shoulders/hips are nearly stacked
+// (narrow x) so it reads as DTL and overlays a DTL-recorded swing.
+export function generateModelSwingDTL(pro: Pro, n = 45): number[][] {
+  const STr = rad(pro.shoulder_turn_deg || 92);
+
+  // Profile anatomy (RH, target up/right). Forward tilt: shoulders ahead of hips.
+  const shCx = 0.55;
+  const shoulderY = 0.4;
+  const hipCx = 0.49;
+  const hipY = 0.62;
+  const kneeCx = 0.475;
+  const kneeY = 0.78;
+  const ankCx = 0.47;
+  const ankleY = 0.93;
+  const noseY = 0.31;
+  const shHalf = 0.018; // small width → reads as DTL
+  const hipHalf = 0.02;
+  const Rh = 0.2;
+
+  // Hands sweep the (tilted) swing plane: low-front → up-back → impact → up-front.
+  const handPsi: [number, number][] = [
+    [0, 65], [0.18, 120], [0.4, 250], [0.55, 200], [0.66, 72], [0.8, -10], [1, -55],
+  ];
+  const coilU: [number, number][] = [[0, 0], [0.4, 1], [0.66, -0.05], [1, -1.0]];
+
+  const frames: number[][] = [];
+  for (let k = 0; k < n; k++) {
+    const t = k / (n - 1);
+    const psi = rad(interp(handPsi, t));
+    const coil = interp(coilU, t);
+    const scx = shCx + 0.02 * Math.sin(coil * STr); // subtle coil/sway
+    const impactProx = Math.max(0, 1 - Math.abs(t - 0.66) / 0.34);
+    const headLean = 0.02 * impactProx;
+
+    const f = new Array(66).fill(0);
+    set(f, 11, scx - shHalf, shoulderY); // lShoulder (far)
+    set(f, 12, scx + shHalf, shoulderY + 0.006); // rShoulder (near)
+    set(f, 23, hipCx - hipHalf, hipY);
+    set(f, 24, hipCx + hipHalf, hipY + 0.004);
+    set(f, 25, kneeCx - hipHalf, kneeY);
+    set(f, 26, kneeCx + hipHalf, kneeY);
+    set(f, 27, ankCx - hipHalf, ankleY);
+    set(f, 28, ankCx + hipHalf, ankleY);
+    set(f, 0, scx + 0.06 + headLean, noseY); // head over the ball
+
+    const hx = scx + Rh * Math.cos(psi);
+    const hy = shoulderY + Rh * Math.sin(psi);
+    set(f, 15, hx - 0.01, hy); // lWrist
+    set(f, 16, hx + 0.01, hy + 0.006); // rWrist
+
+    // Elbows between shoulder and hand, biased slightly toward the body.
+    const elx = (lr: number) => scx + lr * shHalf + (hx - (scx + lr * shHalf)) * 0.5 + (scx - hx) * 0.06;
+    const ely = shoulderY + (hy - shoulderY) * 0.52;
+    set(f, 13, elx(-1), ely);
+    set(f, 14, elx(1), ely + 0.006);
+
+    frames.push(f);
+  }
+  return frames;
+}
