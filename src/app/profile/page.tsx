@@ -395,24 +395,33 @@ function measure(p: Frame, vw: number, vh: number): { arm: number; sh: number; l
   }
   const P = (i: number) => ({ x: p[i].x * vw, y: p[i].y * vh });
   const d = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
+  const vis = (i: number) => (p[i]?.visibility ?? 0) > 0.3;
 
-  const nose = P(LM.nose);
   const ankleY = Math.max(P(LM.lAnkle).y, P(LM.rAnkle).y);
   const shoulderY = (P(LM.lShoulder).y + P(LM.rShoulder).y) / 2;
   const hipY = (P(LM.lHip).y + P(LM.rHip).y) / 2;
-  // Must be upright & full height: shoulders above hips above ankles.
-  if (!(shoulderY < hipY && hipY < ankleY)) return null;
-  // Nose-to-ankle ≈ 0.83 of stature (nose ~0.90H, ankle ~0.07H).
-  const stature = (ankleY - nose.y) / 0.83;
-  if (stature < vh * 0.25) return null; // body too small / partial
+  if (!(shoulderY < hipY && hipY < ankleY)) return null; // upright, full body
 
+  // Stature: prefer eye-level → feet (more accurate). Eyes ≈ 0.93H, feet ≈ 0.02H.
+  const topY = vis(LM.lEye) && vis(LM.rEye)
+    ? Math.min(P(LM.lEye).y, P(LM.rEye).y)
+    : P(LM.nose).y;
+  const footPts = [LM.lHeel, LM.rHeel, LM.lFoot, LM.rFoot].filter(vis).map(P);
+  const botY = footPts.length ? Math.max(...footPts.map((q) => q.y)) : ankleY;
+  // Factor: eye→foot ≈ 0.91H; nose→ankle ≈ 0.83H.
+  const useEyeFoot = (vis(LM.lEye) && vis(LM.rEye)) && footPts.length > 0;
+  const stature = (botY - topY) / (useEyeFoot ? 0.91 : 0.83);
+  if (stature < vh * 0.25) return null;
+
+  // Arm: shoulder→elbow→wrist (matchPro's shoulder-to-wrist dimension).
   const arm =
     (d(P(LM.lShoulder), P(LM.lElbow)) + d(P(LM.lElbow), P(LM.lWrist)) +
       d(P(LM.rShoulder), P(LM.rElbow)) + d(P(LM.rElbow), P(LM.rWrist))) / 2;
   const sh = d(P(LM.lShoulder), P(LM.rShoulder));
-  const leg =
-    (d(P(LM.lHip), P(LM.lKnee)) + d(P(LM.lKnee), P(LM.lAnkle)) +
-      d(P(LM.rHip), P(LM.rKnee)) + d(P(LM.rKnee), P(LM.rAnkle))) / 2;
+  // Leg: hip→knee→ankle (→heel when visible for a truer inseam-to-floor length).
+  const legSide = (hip: number, knee: number, ank: number, heel: number) =>
+    d(P(hip), P(knee)) + d(P(knee), P(ank)) + (vis(heel) ? d(P(ank), P(heel)) * 0.5 : 0);
+  const leg = (legSide(LM.lHip, LM.lKnee, LM.lAnkle, LM.lHeel) + legSide(LM.rHip, LM.rKnee, LM.rAnkle, LM.rHeel)) / 2;
 
   return { arm: arm / stature, sh: sh / stature, leg: leg / stature };
 }

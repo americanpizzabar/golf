@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { PageHeader, Card } from "@/components/ui";
-import { getSegLandmarker, LM, type Frame } from "@/lib/pose";
+import { getSegLandmarker, drawSkeleton, LM, type Frame } from "@/lib/pose";
 import { generateModelSwing, generateModelSwingDTL } from "@/lib/model-swing";
 import { interpFrame, ANGLE_LABEL, type ViewAngle } from "@/lib/ghost-sync";
 import { matchPro } from "@/lib/swing";
@@ -40,6 +40,8 @@ export default function SilhouettePage() {
   const [proName, setProName] = useState("");
   const [angle, setAngle] = useState<ViewAngle>("front");
   const [err, setErr] = useState("");
+  const [maskOk, setMaskOk] = useState<boolean | null>(null);
+  const maskOkRef = useRef<boolean | null>(null);
   const playingRef = useRef(false);
 
   useEffect(() => {
@@ -122,7 +124,12 @@ export default function SilhouettePage() {
         const res = model.detectForVideo(video, tsRef.current);
         const user = res.landmarks?.[0] as Frame | undefined;
         const mask = res.segmentationMasks?.[0] as MPMask | undefined;
-        if (user && mask) {
+        const hasMask = !!mask;
+        if (maskOkRef.current !== hasMask) {
+          maskOkRef.current = hasMask;
+          setMaskOk(hasMask);
+        }
+        if (user) {
           if (playingRef.current) {
             phaseRef.current = (phaseRef.current + 0.006) % 1;
             setPhase(phaseRef.current);
@@ -181,68 +188,79 @@ export default function SilhouettePage() {
     return out;
   }
 
-  function render(canvas: HTMLCanvasElement, user: Frame, mask: MPMask) {
-    const mw = mask.width;
-    const mh = mask.height;
-    const arr = mask.getAsFloat32Array();
-    // Offscreen pro mask
-    if (!proRef.current) proRef.current = document.createElement("canvas");
-    if (!silRef.current) silRef.current = document.createElement("canvas");
-    const pro = proRef.current;
-    const sil = silRef.current;
-    if (pro.width !== mw) { pro.width = mw; pro.height = mh; sil.width = mw; sil.height = mh; }
-    const pctx = pro.getContext("2d", { willReadFrequently: true })!;
-    pctx.clearRect(0, 0, mw, mh);
-
-    const pts = alignedPro(user);
-    if (pts) {
-      const torsoLen = Math.hypot(pts[LM.lShoulder].x - pts[LM.lHip].x, pts[LM.lShoulder].y - pts[LM.lHip].y);
-      const lw = Math.max(3, torsoLen * mh * 0.34);
-      pctx.fillStyle = "#fff";
-      pctx.strokeStyle = "#fff";
-      pctx.lineCap = "round";
-      pctx.lineJoin = "round";
-      pctx.lineWidth = lw;
-      for (const [a, b] of BONES) {
-        pctx.beginPath();
-        pctx.moveTo(pts[a].x * mw, pts[a].y * mh);
-        pctx.lineTo(pts[b].x * mw, pts[b].y * mh);
-        pctx.stroke();
-      }
-      // torso fill
-      pctx.beginPath();
-      for (const i of [LM.lShoulder, LM.rShoulder, LM.rHip, LM.lHip]) pctx.lineTo(pts[i].x * mw, pts[i].y * mh);
-      pctx.closePath();
-      pctx.fill();
-      // head
-      pctx.beginPath();
-      pctx.arc(pts[LM.nose].x * mw, pts[LM.nose].y * mh, lw * 0.9, 0, Math.PI * 2);
-      pctx.fill();
+  // Flesh the aligned pro skeleton into a filled silhouette on a 2D context.
+  function fleshPro(ctx: CanvasRenderingContext2D, pts: Pt[], w: number, h: number, fill: string) {
+    const torsoLen = Math.hypot(pts[LM.lShoulder].x - pts[LM.lHip].x, pts[LM.lShoulder].y - pts[LM.lHip].y);
+    const lw = Math.max(3, torsoLen * h * 0.34);
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = fill;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = lw;
+    for (const [a, b] of BONES) {
+      ctx.beginPath();
+      ctx.moveTo(pts[a].x * w, pts[a].y * h);
+      ctx.lineTo(pts[b].x * w, pts[b].y * h);
+      ctx.stroke();
     }
-    const proAlpha = pctx.getImageData(0, 0, mw, mh).data;
+    ctx.beginPath();
+    for (const i of [LM.lShoulder, LM.rShoulder, LM.rHip, LM.lHip]) ctx.lineTo(pts[i].x * w, pts[i].y * h);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(pts[LM.nose].x * w, pts[LM.nose].y * h, lw * 0.9, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
-    // Composite: cyan user, gold pro, red overflow (user outside pro).
-    if (!outRef.current || outRef.current.width !== mw || outRef.current.height !== mh) {
-      outRef.current = new ImageData(mw, mh);
-    }
-    const out = outRef.current.data;
-    for (let i = 0; i < mw * mh; i++) {
-      const u = arr[i] > 0.5;
-      const p = proAlpha[i * 4 + 3] > 40;
-      let r = 0, g = 0, b = 0, al = 0;
-      if (u && !p) { r = 244; g = 63; b = 94; al = 165; } // overflow (hami-dashi)
-      else if (u && p) { r = 34; g = 211; b = 238; al = 90; } // matched
-      else if (!u && p) { r = 250; g = 204; b = 80; al = 80; } // pro reach you miss
-      const o = i * 4;
-      out[o] = r; out[o + 1] = g; out[o + 2] = b; out[o + 3] = al;
-    }
-    const sctx = sil.getContext("2d")!;
-    sctx.putImageData(outRef.current, 0, 0);
-
+  function render(canvas: HTMLCanvasElement, user: Frame, mask?: MPMask) {
     const ctx = canvas.getContext("2d")!;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(sil, 0, 0, canvas.width, canvas.height);
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    const pts = alignedPro(user);
+
+    // 1) Pro silhouette (translucent gold) — always visible, even without a mask.
+    if (pts) {
+      ctx.save();
+      ctx.globalAlpha = 0.32;
+      fleshPro(ctx, pts, W, H, "#facc50");
+      ctx.restore();
+    }
+
+    // 2) Segmentation heat-map (your silhouette cyan, overflow red) when available.
+    if (mask && pts) {
+      const mw = mask.width;
+      const mh = mask.height;
+      const arr = mask.getAsFloat32Array();
+      if (!proRef.current) proRef.current = document.createElement("canvas");
+      if (!silRef.current) silRef.current = document.createElement("canvas");
+      const pro = proRef.current;
+      const sil = silRef.current;
+      if (pro.width !== mw) { pro.width = mw; pro.height = mh; sil.width = mw; sil.height = mh; }
+      const pctx = pro.getContext("2d", { willReadFrequently: true })!;
+      pctx.clearRect(0, 0, mw, mh);
+      fleshPro(pctx, pts, mw, mh, "#fff");
+      const proAlpha = pctx.getImageData(0, 0, mw, mh).data;
+      if (!outRef.current || outRef.current.width !== mw || outRef.current.height !== mh) {
+        outRef.current = new ImageData(mw, mh);
+      }
+      const out = outRef.current.data;
+      for (let i = 0; i < mw * mh; i++) {
+        const u = arr[i] > 0.5;
+        const p = proAlpha[i * 4 + 3] > 40;
+        let r = 0, g = 0, b = 0, al = 0;
+        if (u && !p) { r = 244; g = 63; b = 94; al = 175; } // overflow (hami-dashi)
+        else if (u && p) { r = 34; g = 211; b = 238; al = 95; } // matched
+        const o = i * 4;
+        out[o] = r; out[o + 1] = g; out[o + 2] = b; out[o + 3] = al;
+      }
+      sil.getContext("2d")!.putImageData(outRef.current, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(sil, 0, 0, W, H);
+    }
+
+    // 3) Your live skeleton (cyan) on top — guaranteed visible reference.
+    drawSkeleton(ctx, user, W, H, "#22d3ee");
   }
 
   return (
@@ -279,10 +297,15 @@ export default function SilhouettePage() {
         {/* Legend */}
         <Card>
           <div className="grid grid-cols-3 gap-2 text-center text-[11px]">
-            <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#22d3ee" }} /> 一致</div>
+            <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#22d3ee" }} /> 自分（骨格/一致）</div>
             <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#f43f5e" }} /> ハミ出し</div>
-            <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#facc50" }} /> プロの可動域</div>
+            <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#facc50" }} /> プロのシルエット</div>
           </div>
+          {camOn && maskOk === false && (
+            <div className="text-[11px] mt-2" style={{ color: "var(--amber)" }}>
+              ※ この端末では輪郭（セグメンテーション）抽出が無効のため、骨格＋プロのシルエットで表示しています。
+            </div>
+          )}
         </Card>
 
         {err && <Card className="text-sm" style={{ color: "#fca5a5" }}>{err}</Card>}
