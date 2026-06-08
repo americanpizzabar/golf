@@ -7,7 +7,7 @@ import { getProfile } from "@/lib/db";
 import { extractClip, type Clip } from "@/lib/clip";
 import { crossAnalyze, type CrossResult } from "@/lib/cross-angle";
 import { TwinPlayer, CrossReport, SyncBadge } from "@/components/CrossPlayer";
-import { SyncSession, type SyncState } from "@/lib/sync-session";
+import { SyncSession, type SyncState, type Transport } from "@/lib/sync-session";
 
 type Mode = "choose" | "host" | "guest";
 type Stage = "live" | "analyzing" | "result";
@@ -39,6 +39,7 @@ export default function SyncPage() {
   const [code, setCode] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [conn, setConn] = useState<SyncState>("signaling");
+  const [transport, setTransport] = useState<Transport>("pending");
   const [hostRole, setHostRole] = useState<Angle>("front"); // host's own angle
   const [guestRole, setGuestRole] = useState<Angle>("dtl"); // shown on the guest
   const [recording, setRecording] = useState(false);
@@ -224,8 +225,9 @@ export default function SyncPage() {
         }
         if (s === "connected" && role === "guest") setStatus("接続しました。親機の操作を待っています…");
         if (s === "failed")
-          setErr("端末間の直接接続に失敗しました。両端末を同じWi-Fiに繋いで再度お試しください。");
+          setErr("動画の転送に失敗しました。通信環境を確認してもう一度お試しください。");
       },
+      onTransport: (t: Transport) => setTransport(t),
       onMessage: (msg: Record<string, unknown>) => {
         if (msg.t === "role" && (msg.role === "front" || msg.role === "dtl")) {
           setGuestRole(msg.role);
@@ -308,6 +310,7 @@ export default function SyncPage() {
     setCode("");
     setJoinCode("");
     setConn("signaling");
+    setTransport("pending");
     setClips({});
     setResult(null);
     setStatus("");
@@ -413,6 +416,22 @@ export default function SyncPage() {
               {status && (
                 <div className="text-[12px] mt-1.5" style={{ color: "var(--muted)" }}>
                   {status}
+                </div>
+              )}
+              {connected && (
+                <div className="mt-2 flex items-center gap-1.5 text-[11px]">
+                  <span style={{ color: "var(--muted)" }}>転送経路:</span>
+                  {transport === "p2p" ? (
+                    <span className="px-1.5 py-0.5 rounded font-bold" style={{ background: "var(--green)", color: "#03260f" }}>
+                      端末間 直接 P2P（高速・非経由）
+                    </span>
+                  ) : transport === "relay" ? (
+                    <span className="px-1.5 py-0.5 rounded font-bold" style={{ background: "var(--amber)", color: "#2a1a00" }}>
+                      クラウド リレー（自動切替）
+                    </span>
+                  ) : (
+                    <span style={{ color: "var(--muted)" }}>確立中…</span>
+                  )}
                 </div>
               )}
             </Card>

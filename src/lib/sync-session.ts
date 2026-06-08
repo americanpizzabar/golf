@@ -3,14 +3,27 @@
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 
-// Peer-to-peer sync session for 2-device synchronized recording. Supabase
-// Realtime broadcast is used ONLY as the WebRTC signaling channel (SDP + ICE
-// handshake) — no database tables, no storage. Once the RTCDataChannel opens,
-// record commands and the recorded clip itself flow directly device-to-device,
-// so no video ever touches the cloud.
+// Peer-to-peer sync session for 2-device synchronized recording.
+//
+// Two transports, chosen automatically:
+//  - CONTROL (role / start / stop): always sent over Supabase Realtime
+//    broadcast. A websocket hop is low-latency enough to start both phones
+//    together, and the residual skew is corrected later by impact-sound sync.
+//    This means the session works even if the direct peer connection never
+//    forms.
+//  - CLIP (the recorded video): preferred over a direct WebRTC data channel
+//    (fast, private, never touches the cloud). If the data channel cannot be
+//    established (strict NAT / different networks), the guest falls back to
+//    relaying the clip through a transient Supabase Storage object, which the
+//    host downloads and then deletes.
+//
+// Realtime broadcast is also the WebRTC signaling channel (SDP + ICE).
 
 type Role = "host" | "guest";
 export type SyncState = "signaling" | "connecting" | "connected" | "failed" | "closed";
+export type Transport = "pending" | "p2p" | "relay";
+
+const RELAY_BUCKET = "sync-clips";
 
 interface Signal {
   k: "hello" | "offer" | "answer" | "ice";
@@ -21,6 +34,7 @@ interface Signal {
 
 export interface SyncHandlers {
   onState?: (s: SyncState) => void;
+  onTransport?: (t: Transport) => void;
   onMessage?: (msg: Record<string, unknown>) => void;
   onClipProgress?: (kind: string, p: number) => void;
   onClip?: (kind: string, blob: Blob) => void;
@@ -43,10 +57,13 @@ export class SyncSession {
   private h: SyncHandlers;
   private negotiated = false;
   private remoteSet = false;
+  private connected = false;
+  private dcOpen = false;
   private pendingIce: RTCIceCandidateInit[] = [];
   private helloTimer: ReturnType<typeof setInterval> | null = null;
+  private relayPaths: string[] = []; // objects this device uploaded (for cleanup)
 
-  // Incoming clip reassembly.
+  // Incoming clip reassembly (data-channel fast path).
   private rxChunks: ArrayBuffer[] = [];
   private rxMeta: { size: number; mime: string; kind: string } | null = null;
   private rxReceived = 0;
@@ -61,9 +78,9 @@ export class SyncSession {
     this.setupPeer();
     const ch = supabase.channel(`sync-${this.code}`, { config: { broadcast: { self: false } } });
     ch.on("broadcast", { event: "sig" }, ({ payload }) => this.onSignal(payload as Signal));
+    ch.on("broadcast", { event: "ctrl" }, ({ payload }) => this.onCtrl(payload as Record<string, unknown>));
     await ch.subscribe((status) => {
       if (status === "SUBSCRIBED" && this.role === "guest") {
-        // The guest announces itself; retry until the host picks it up.
         this.sendSignal({ k: "hello", from: this.id });
         this.helloTimer = setInterval(() => {
           if (this.negotiated) {
@@ -77,17 +94,13 @@ export class SyncSession {
     });
     this.ch = ch;
     this.h.onState?.("signaling");
+    this.h.onTransport?.("pending");
   }
 
   private setupPeer() {
     const pc = new RTCPeerConnection(ICE);
     pc.onicecandidate = (e) => {
       if (e.candidate) this.sendSignal({ k: "ice", from: this.id, cand: e.candidate.toJSON() });
-    };
-    pc.onconnectionstatechange = () => {
-      const st = pc.connectionState;
-      if (st === "connecting") this.h.onState?.("connecting");
-      else if (st === "failed") this.h.onState?.("failed");
     };
     if (this.role === "host") {
       this.bindDc(pc.createDataChannel("clip", { ordered: true }));
@@ -99,17 +112,33 @@ export class SyncSession {
 
   private bindDc(dc: RTCDataChannel) {
     dc.binaryType = "arraybuffer";
-    dc.onopen = () => this.h.onState?.("connected");
-    dc.onclose = () => this.h.onState?.("closed");
+    dc.onopen = () => {
+      this.dcOpen = true;
+      this.markConnected();
+      this.h.onTransport?.("p2p");
+    };
+    dc.onclose = () => {
+      this.dcOpen = false;
+    };
     dc.onmessage = (e) => this.onDcMessage(e.data);
     this.dc = dc;
   }
 
+  private markConnected() {
+    if (this.connected) return;
+    this.connected = true;
+    this.h.onState?.("connected");
+  }
+
+  // --- WebRTC signaling (fast-path establishment) --------------------------
   private async onSignal(sig: Signal) {
     const pc = this.pc;
     if (!pc || sig.from === this.id) return;
     try {
       if (this.role === "host" && sig.k === "hello") {
+        // A guest is present: the session is usable now (control over Realtime).
+        this.markConnected();
+        this.sendCtrl({ t: "__ack" });
         if (this.negotiated) return;
         this.negotiated = true;
         const offer = await pc.createOffer();
@@ -132,7 +161,8 @@ export class SyncSession {
         else this.pendingIce.push(sig.cand);
       }
     } catch {
-      this.h.onState?.("failed");
+      // A signaling failure is non-fatal: control still works over Realtime
+      // and the clip can be relayed through storage.
     }
   }
 
@@ -145,11 +175,31 @@ export class SyncSession {
     this.ch?.send({ type: "broadcast", event: "sig", payload: sig });
   }
 
-  // Send a small JSON control message over the data channel.
-  send(msg: Record<string, unknown>) {
-    if (this.dc?.readyState === "open") this.dc.send(JSON.stringify(msg));
+  // --- Control channel (always over Realtime) ------------------------------
+  private sendCtrl(msg: Record<string, unknown>) {
+    this.ch?.send({ type: "broadcast", event: "ctrl", payload: { ...msg, from: this.id } });
   }
 
+  // Public API used by the page to send role / start / stop commands.
+  send(msg: Record<string, unknown>) {
+    this.sendCtrl(msg);
+  }
+
+  private onCtrl(msg: Record<string, unknown>) {
+    if (msg.from === this.id) return;
+    const t = msg.t;
+    if (t === "__ack") {
+      this.markConnected();
+      return;
+    }
+    if (t === "clip-ready") {
+      this.receiveRelayClip(String(msg.path), String(msg.kind), String(msg.mime || ""));
+      return;
+    }
+    this.h.onMessage?.(msg);
+  }
+
+  // --- Data-channel clip path ---------------------------------------------
   private onDcMessage(data: string | ArrayBuffer) {
     if (typeof data === "string") {
       const msg = JSON.parse(data) as Record<string, unknown>;
@@ -165,8 +215,6 @@ export class SyncSession {
           this.rxMeta = null;
           this.h.onClip?.(kind, blob);
         }
-      } else {
-        this.h.onMessage?.(msg);
       }
     } else if (this.rxMeta) {
       this.rxChunks.push(data);
@@ -178,14 +226,24 @@ export class SyncSession {
     }
   }
 
-  // Stream a recorded clip to the peer in chunks, with backpressure handling.
+  // Send a recorded clip to the peer. Uses the data channel if open, otherwise
+  // relays through Supabase Storage.
   async sendClip(kind: string, blob: Blob) {
-    const dc = this.dc;
-    if (!dc || dc.readyState !== "open") return;
+    if (this.dcOpen && this.dc?.readyState === "open") {
+      this.h.onTransport?.("p2p");
+      await this.sendClipOverDc(kind, blob);
+    } else {
+      this.h.onTransport?.("relay");
+      await this.sendClipOverRelay(kind, blob);
+    }
+  }
+
+  private async sendClipOverDc(kind: string, blob: Blob) {
+    const dc = this.dc!;
     const buf = await blob.arrayBuffer();
     const CHUNK = 16 * 1024;
     dc.bufferedAmountLowThreshold = 256 * 1024;
-    this.send({ t: "clip-meta", size: buf.byteLength, mime: blob.type, kind });
+    this.send_dc({ t: "clip-meta", size: buf.byteLength, mime: blob.type, kind });
     let offset = 0;
     while (offset < buf.byteLength) {
       if (dc.bufferedAmount > 4 * 1024 * 1024) {
@@ -197,15 +255,60 @@ export class SyncSession {
           dc.addEventListener("bufferedamountlow", on);
         });
       }
-      dc.send(buf.slice(offset, Math.min(offset + CHUNK, buf.byteLength)));
-      offset = Math.min(offset + CHUNK, buf.byteLength);
+      const next = Math.min(offset + CHUNK, buf.byteLength);
+      dc.send(buf.slice(offset, next));
+      offset = next;
       this.h.onClipProgress?.(kind, offset / buf.byteLength);
     }
-    this.send({ t: "clip-end" });
+    this.send_dc({ t: "clip-end" });
+  }
+
+  private send_dc(msg: Record<string, unknown>) {
+    if (this.dc?.readyState === "open") this.dc.send(JSON.stringify(msg));
+  }
+
+  private async sendClipOverRelay(kind: string, blob: Blob) {
+    const path = `${this.code}/${this.id}-${Date.now()}.bin`;
+    this.h.onClipProgress?.(kind, 0.05);
+    const { error } = await supabase.storage
+      .from(RELAY_BUCKET)
+      .upload(path, blob, { contentType: blob.type || "application/octet-stream", upsert: true });
+    if (error) {
+      this.h.onState?.("failed");
+      return;
+    }
+    this.relayPaths.push(path);
+    this.h.onClipProgress?.(kind, 1);
+    this.sendCtrl({ t: "clip-ready", kind, path, mime: blob.type });
+    // Backstop cleanup in case the host never downloads (e.g. it left).
+    setTimeout(() => this.cleanupRelay(), 120_000);
+  }
+
+  private async receiveRelayClip(path: string, kind: string, mime: string) {
+    this.h.onTransport?.("relay");
+    this.h.onClipProgress?.(kind, 0.5);
+    const { data, error } = await supabase.storage.from(RELAY_BUCKET).download(path);
+    if (error || !data) {
+      this.h.onState?.("failed");
+      return;
+    }
+    const blob = mime ? new Blob([data], { type: mime }) : data;
+    this.h.onClipProgress?.(kind, 1);
+    this.h.onClip?.(kind, blob);
+    // The host removes the relayed object as soon as it has it.
+    await supabase.storage.from(RELAY_BUCKET).remove([path]).catch(() => {});
+  }
+
+  private async cleanupRelay() {
+    if (!this.relayPaths.length) return;
+    const paths = this.relayPaths;
+    this.relayPaths = [];
+    await supabase.storage.from(RELAY_BUCKET).remove(paths).catch(() => {});
   }
 
   close() {
     if (this.helloTimer) clearInterval(this.helloTimer);
+    this.cleanupRelay();
     try {
       this.dc?.close();
     } catch {
