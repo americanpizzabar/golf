@@ -166,6 +166,13 @@ export default function Home() {
             accent="#8b5cf6"
           />
           <LinkCard
+            href="/cross"
+            icon="🎬"
+            title="クロスアングル解析"
+            desc="正面×後方を打音で同期・2視点で真因を判定"
+            accent="#ec4899"
+          />
+          <LinkCard
             href="/ghost"
             icon="👻"
             title="ゴースト比較"
