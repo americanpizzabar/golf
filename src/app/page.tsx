@@ -166,6 +166,13 @@ export default function Home() {
             accent="#8b5cf6"
           />
           <LinkCard
+            href="/sync"
+            icon="📡"
+            title="シンクロ撮影（2台同時）"
+            desc="2台を6桁コードで接続・正面×後方を同時録画"
+            accent="#14b8a6"
+          />
+          <LinkCard
             href="/cross"
             icon="🎬"
             title="クロスアングル解析"
