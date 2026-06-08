@@ -40,12 +40,36 @@ export interface SyncHandlers {
   onClip?: (kind: string, blob: Blob) => void;
 }
 
-const ICE: RTCConfiguration = {
-  iceServers: [
+// ICE servers. Public STUN handles most home/office NATs. For strict
+// (symmetric) NAT — common on mobile carriers / corporate Wi-Fi — a direct
+// peer connection needs a TURN relay; supply one via env vars and the data
+// channel itself can traverse it, keeping clips on the fast streaming path
+// instead of the storage fallback. TURN is optional: without it the app still
+// works (control over Realtime, clips over the storage relay).
+//
+//   NEXT_PUBLIC_TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349
+//   NEXT_PUBLIC_TURN_USERNAME=...
+//   NEXT_PUBLIC_TURN_CREDENTIAL=...
+function buildIceServers(): RTCIceServer[] {
+  const servers: RTCIceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-  ],
-};
+  ];
+  const turnUrls = process.env.NEXT_PUBLIC_TURN_URLS?.trim();
+  if (turnUrls) {
+    servers.push({
+      urls: turnUrls.split(",").map((u) => u.trim()).filter(Boolean),
+      username: process.env.NEXT_PUBLIC_TURN_USERNAME || undefined,
+      credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL || undefined,
+    });
+  }
+  return servers;
+}
+
+const ICE: RTCConfiguration = { iceServers: buildIceServers() };
+
+// True when a TURN relay is configured (used only for UI/telemetry hints).
+export const hasTurn = !!process.env.NEXT_PUBLIC_TURN_URLS?.trim();
 
 export class SyncSession {
   readonly code: string;
