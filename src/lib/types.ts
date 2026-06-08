@@ -151,6 +151,23 @@ export interface RoundPlayer {
   approachAtt: number;
 }
 
+// A saved two-camera (cross-angle / synchronized) analysis. Stores only the
+// derived metrics + findings, never the video itself.
+export interface CrossSession {
+  id: string;
+  device_id: string;
+  created_at: string;
+  source: "sync" | "cross";
+  score: number | null;
+  top_finding: string | null;
+  top_severity: "high" | "mid" | "low" | "ok" | null;
+  front_metrics: Record<string, number>;
+  dtl_metrics: Record<string, number>;
+  findings: import("./cross-angle").CrossFinding[];
+  left_handed: boolean;
+  height_cm: number | null;
+}
+
 export interface Round {
   id: string;
   device_id: string;

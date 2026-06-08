@@ -3,10 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import { PageHeader, Card, Spinner } from "@/components/ui";
 import { getPoseLandmarker } from "@/lib/pose";
-import { getProfile } from "@/lib/db";
+import { getProfile, saveCrossSession } from "@/lib/db";
 import { extractClip, type Clip } from "@/lib/clip";
 import { crossAnalyze, type CrossResult } from "@/lib/cross-angle";
 import { TwinPlayer, CrossReport, SyncBadge } from "@/components/CrossPlayer";
+import { CrossHistory } from "@/components/CrossHistory";
 
 type Slot = "front" | "dtl";
 type Stage = "idle" | "processing" | "ready";
@@ -77,7 +78,9 @@ export default function CrossPage() {
       }
 
       setClips({ front, dtl });
-      setResult(crossAnalyze(front.flat, dtl.flat, { leftHanded, heightCm }));
+      const res = crossAnalyze(front.flat, dtl.flat, { leftHanded, heightCm });
+      setResult(res);
+      saveCrossSession(res, { source: "cross", leftHanded, heightCm }).catch(() => {});
       setStage("ready");
     } catch (e) {
       console.error(e);
@@ -159,6 +162,7 @@ export default function CrossPage() {
                 が便利です。解析はすべて端末内(MediaPipe)で行われます。
               </div>
             </Card>
+            <CrossHistory />
           </>
         )}
 

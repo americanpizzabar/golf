@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeader, Card, Spinner } from "@/components/ui";
 import { getPoseLandmarker } from "@/lib/pose";
-import { getProfile } from "@/lib/db";
+import { getProfile, saveCrossSession } from "@/lib/db";
 import { extractClip, type Clip } from "@/lib/clip";
 import { crossAnalyze, type CrossResult } from "@/lib/cross-angle";
 import { TwinPlayer, CrossReport, SyncBadge } from "@/components/CrossPlayer";
+import { CrossHistory } from "@/components/CrossHistory";
 import { SyncSession, type SyncState, type Transport } from "@/lib/sync-session";
 
 type Mode = "choose" | "host" | "guest";
@@ -202,7 +203,16 @@ export default function SyncPage() {
         return;
       }
       setClips({ front, dtl });
-      setResult(crossAnalyze(front.flat, dtl.flat, { leftHanded: leftRef.current, heightCm: heightRef.current }));
+      const res = crossAnalyze(front.flat, dtl.flat, {
+        leftHanded: leftRef.current,
+        heightCm: heightRef.current,
+      });
+      setResult(res);
+      saveCrossSession(res, {
+        source: "sync",
+        leftHanded: leftRef.current,
+        heightCm: heightRef.current,
+      }).catch(() => {});
       setStage("result");
     } catch (e) {
       console.error(e);
@@ -344,7 +354,7 @@ export default function SyncPage() {
               <div className="text-sm font-semibold">2台で同時に撮影する</div>
               <p className="text-[12px]" style={{ color: "var(--muted)" }}>
                 片方を「親機」にして6桁コードを発行し、もう片方の「子機」で入力します。親機の録画ボタンで
-                両方が同時に録画され、子機の映像は端末間で直接送られて自動解析されます（クラウド保存なし）。
+                両方が同時に録画され、子機の映像が自動で集約・解析されます。映像は原則端末間で直接送られます。
               </p>
               <button
                 onClick={createSession}
@@ -379,10 +389,12 @@ export default function SyncPage() {
             </Card>
             <Card>
               <div className="text-[11px] leading-relaxed" style={{ color: "var(--muted)" }}>
-                💡 両端末を<strong>同じWi-Fi</strong>に繋ぐと接続が安定します。三脚やもう1台のスマホを
-                正面・後方に設置し、インパクトの打音がどちらにも入るようにすると同期精度が上がります。
+                💡 三脚やもう1台のスマホを正面・後方に設置し、インパクトの打音がどちらにも入るようにすると
+                同期精度が上がります。映像は<strong>原則として端末間で直接</strong>送られますが、直接つながらない
+                回線では一時的にクラウドを経由（転送後すぐ削除）するので、別々のネットワークでも使えます。
               </div>
             </Card>
+            <CrossHistory />
           </>
         )}
 
