@@ -1,29 +1,26 @@
 "use client";
 
-import type { RealtimeChannel } from "@supabase/supabase-js";
-import { supabase } from "./supabase";
+import { upload } from "@vercel/blob/client";
 
 // Peer-to-peer sync session for 2-device synchronized recording.
 //
 // Two transports, chosen automatically:
-//  - CONTROL (role / start / stop): always sent over Supabase Realtime
-//    broadcast. A websocket hop is low-latency enough to start both phones
-//    together, and the residual skew is corrected later by impact-sound sync.
-//    This means the session works even if the direct peer connection never
-//    forms.
+//  - CONTROL (role / start / stop) and WebRTC signaling: relayed through a
+//    polled HTTP mailbox (/api/sync, backed by Neon). A websocket would be
+//    lower latency, but the residual start-skew is corrected afterwards by the
+//    impact-sound alignment, so short-interval polling is sufficient and keeps
+//    the whole stack on Neon (no realtime service).
 //  - CLIP (the recorded video): preferred over a direct WebRTC data channel
 //    (fast, private, never touches the cloud). If the data channel cannot be
 //    established (strict NAT / different networks), the guest falls back to
-//    relaying the clip through a transient Supabase Storage object, which the
-//    host downloads and then deletes.
-//
-// Realtime broadcast is also the WebRTC signaling channel (SDP + ICE).
+//    relaying the clip through Vercel Blob, which the host downloads and then
+//    deletes.
 
 type Role = "host" | "guest";
 export type SyncState = "signaling" | "connecting" | "connected" | "failed" | "closed";
 export type Transport = "pending" | "p2p" | "relay";
 
-const RELAY_BUCKET = "sync-clips";
+const POLL_MS = 700;
 
 interface Signal {
   k: "hello" | "offer" | "answer" | "ice";
@@ -41,11 +38,9 @@ export interface SyncHandlers {
 }
 
 // ICE servers. Public STUN handles most home/office NATs. For strict
-// (symmetric) NAT — common on mobile carriers / corporate Wi-Fi — a direct
-// peer connection needs a TURN relay; supply one via env vars and the data
+// (symmetric) NAT a TURN relay is needed; supply one via env vars and the data
 // channel itself can traverse it, keeping clips on the fast streaming path
-// instead of the storage fallback. TURN is optional: without it the app still
-// works (control over Realtime, clips over the storage relay).
+// instead of the Blob fallback. TURN is optional.
 //
 //   NEXT_PUBLIC_TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349
 //   NEXT_PUBLIC_TURN_USERNAME=...
@@ -68,14 +63,12 @@ function buildIceServers(): RTCIceServer[] {
 
 const ICE: RTCConfiguration = { iceServers: buildIceServers() };
 
-// True when a TURN relay is configured (used only for UI/telemetry hints).
 export const hasTurn = !!process.env.NEXT_PUBLIC_TURN_URLS?.trim();
 
 export class SyncSession {
   readonly code: string;
   readonly role: Role;
   private id = Math.random().toString(36).slice(2, 8);
-  private ch: RealtimeChannel | null = null;
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
   private h: SyncHandlers;
@@ -83,9 +76,16 @@ export class SyncSession {
   private remoteSet = false;
   private connected = false;
   private dcOpen = false;
+  private closed = false;
   private pendingIce: RTCIceCandidateInit[] = [];
   private helloTimer: ReturnType<typeof setInterval> | null = null;
-  private relayPaths: string[] = []; // objects this device uploaded (for cleanup)
+
+  // HTTP polling mailbox state (replaces the Realtime channel).
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private lastSeq = 0;
+  private polling = false;
+
+  private relayUrls: string[] = []; // Blob URLs this device uploaded (cleanup).
 
   // Incoming clip reassembly (data-channel fast path).
   private rxChunks: ArrayBuffer[] = [];
@@ -100,23 +100,21 @@ export class SyncSession {
 
   async start() {
     this.setupPeer();
-    const ch = supabase.channel(`sync-${this.code}`, { config: { broadcast: { self: false } } });
-    ch.on("broadcast", { event: "sig" }, ({ payload }) => this.onSignal(payload as Signal));
-    ch.on("broadcast", { event: "ctrl" }, ({ payload }) => this.onCtrl(payload as Record<string, unknown>));
-    await ch.subscribe((status) => {
-      if (status === "SUBSCRIBED" && this.role === "guest") {
-        this.sendSignal({ k: "hello", from: this.id });
-        this.helloTimer = setInterval(() => {
-          if (this.negotiated) {
-            if (this.helloTimer) clearInterval(this.helloTimer);
-            this.helloTimer = null;
-          } else {
-            this.sendSignal({ k: "hello", from: this.id });
-          }
-        }, 1500);
-      }
-    });
-    this.ch = ch;
+    // Begin polling the mailbox for signaling + control messages.
+    this.pollTimer = setInterval(() => this.poll(), POLL_MS);
+    this.poll();
+
+    if (this.role === "guest") {
+      this.sendSignal({ k: "hello", from: this.id });
+      this.helloTimer = setInterval(() => {
+        if (this.negotiated) {
+          if (this.helloTimer) clearInterval(this.helloTimer);
+          this.helloTimer = null;
+        } else {
+          this.sendSignal({ k: "hello", from: this.id });
+        }
+      }, 1500);
+    }
     this.h.onState?.("signaling");
     this.h.onTransport?.("pending");
   }
@@ -154,13 +152,61 @@ export class SyncSession {
     this.h.onState?.("connected");
   }
 
+  // --- HTTP mailbox (polling) ----------------------------------------------
+  private async poll() {
+    if (this.polling || this.closed) return;
+    this.polling = true;
+    try {
+      const res = await fetch(
+        `/api/sync?code=${encodeURIComponent(this.code)}&after=${this.lastSeq}&self=${this.id}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) return;
+      const json = (await res.json()) as {
+        messages?: { seq: number; kind: string; payload: unknown }[];
+        last?: number;
+      };
+      for (const m of json.messages ?? []) {
+        if (m.kind === "sig") this.onSignal(m.payload as Signal);
+        else if (m.kind === "ctrl") this.onCtrl(m.payload as Record<string, unknown>);
+        if (m.seq > this.lastSeq) this.lastSeq = m.seq;
+      }
+      if (typeof json.last === "number" && json.last > this.lastSeq) this.lastSeq = json.last;
+    } catch {
+      // Transient network error — the next tick retries.
+    } finally {
+      this.polling = false;
+    }
+  }
+
+  private post(kind: "sig" | "ctrl", payload: unknown) {
+    fetch("/api/sync", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: this.code, sender: this.id, kind, payload }),
+    }).catch(() => {});
+  }
+
+  private sendSignal(sig: Signal) {
+    this.post("sig", sig);
+  }
+
+  private sendCtrl(msg: Record<string, unknown>) {
+    this.post("ctrl", { ...msg, from: this.id });
+  }
+
+  // Public API used by the page to send role / start / stop commands.
+  send(msg: Record<string, unknown>) {
+    this.sendCtrl(msg);
+  }
+
   // --- WebRTC signaling (fast-path establishment) --------------------------
   private async onSignal(sig: Signal) {
     const pc = this.pc;
     if (!pc || sig.from === this.id) return;
     try {
       if (this.role === "host" && sig.k === "hello") {
-        // A guest is present: the session is usable now (control over Realtime).
+        // A guest is present: the session is usable now (control over mailbox).
         this.markConnected();
         this.sendCtrl({ t: "__ack" });
         if (this.negotiated) return;
@@ -185,28 +231,14 @@ export class SyncSession {
         else this.pendingIce.push(sig.cand);
       }
     } catch {
-      // A signaling failure is non-fatal: control still works over Realtime
-      // and the clip can be relayed through storage.
+      // A signaling failure is non-fatal: control still works over the mailbox
+      // and the clip can be relayed through Blob.
     }
   }
 
   private async flushIce() {
     for (const c of this.pendingIce) await this.pc?.addIceCandidate(c).catch(() => {});
     this.pendingIce = [];
-  }
-
-  private sendSignal(sig: Signal) {
-    this.ch?.send({ type: "broadcast", event: "sig", payload: sig });
-  }
-
-  // --- Control channel (always over Realtime) ------------------------------
-  private sendCtrl(msg: Record<string, unknown>) {
-    this.ch?.send({ type: "broadcast", event: "ctrl", payload: { ...msg, from: this.id } });
-  }
-
-  // Public API used by the page to send role / start / stop commands.
-  send(msg: Record<string, unknown>) {
-    this.sendCtrl(msg);
   }
 
   private onCtrl(msg: Record<string, unknown>) {
@@ -217,7 +249,7 @@ export class SyncSession {
       return;
     }
     if (t === "clip-ready") {
-      this.receiveRelayClip(String(msg.path), String(msg.kind), String(msg.mime || ""));
+      this.receiveRelayClip(String(msg.url), String(msg.kind), String(msg.mime || ""));
       return;
     }
     this.h.onMessage?.(msg);
@@ -251,7 +283,7 @@ export class SyncSession {
   }
 
   // Send a recorded clip to the peer. Uses the data channel if open, otherwise
-  // relays through Supabase Storage.
+  // relays through Vercel Blob.
   async sendClip(kind: string, blob: Blob) {
     if (this.dcOpen && this.dc?.readyState === "open") {
       this.h.onTransport?.("p2p");
@@ -292,46 +324,63 @@ export class SyncSession {
   }
 
   private async sendClipOverRelay(kind: string, blob: Blob) {
-    const path = `${this.code}/${this.id}-${Date.now()}.bin`;
-    this.h.onClipProgress?.(kind, 0.05);
-    const { error } = await supabase.storage
-      .from(RELAY_BUCKET)
-      .upload(path, blob, { contentType: blob.type || "application/octet-stream", upsert: true });
-    if (error) {
+    try {
+      this.h.onClipProgress?.(kind, 0.02);
+      const { url } = await upload(`sync/${this.code}/${this.id}-${Date.now()}.bin`, blob, {
+        access: "public",
+        handleUploadUrl: "/api/relay/upload",
+        contentType: blob.type || "application/octet-stream",
+        onUploadProgress: (e) => this.h.onClipProgress?.(kind, Math.max(0.02, e.percentage / 100)),
+      });
+      this.relayUrls.push(url);
+      this.h.onClipProgress?.(kind, 1);
+      this.sendCtrl({ t: "clip-ready", kind, url, mime: blob.type });
+      // Backstop cleanup in case the host never downloads (e.g. it left).
+      setTimeout(() => this.cleanupRelay(), 120_000);
+    } catch {
       this.h.onState?.("failed");
-      return;
     }
-    this.relayPaths.push(path);
-    this.h.onClipProgress?.(kind, 1);
-    this.sendCtrl({ t: "clip-ready", kind, path, mime: blob.type });
-    // Backstop cleanup in case the host never downloads (e.g. it left).
-    setTimeout(() => this.cleanupRelay(), 120_000);
   }
 
-  private async receiveRelayClip(path: string, kind: string, mime: string) {
+  private async receiveRelayClip(url: string, kind: string, mime: string) {
     this.h.onTransport?.("relay");
-    this.h.onClipProgress?.(kind, 0.5);
-    const { data, error } = await supabase.storage.from(RELAY_BUCKET).download(path);
-    if (error || !data) {
+    this.h.onClipProgress?.(kind, 0.4);
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error("download failed");
+      const data = await res.blob();
+      const blob = mime ? new Blob([data], { type: mime }) : data;
+      this.h.onClipProgress?.(kind, 1);
+      this.h.onClip?.(kind, blob);
+    } catch {
       this.h.onState?.("failed");
       return;
     }
-    const blob = mime ? new Blob([data], { type: mime }) : data;
-    this.h.onClipProgress?.(kind, 1);
-    this.h.onClip?.(kind, blob);
     // The host removes the relayed object as soon as it has it.
-    await supabase.storage.from(RELAY_BUCKET).remove([path]).catch(() => {});
+    fetch("/api/relay/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url }),
+    }).catch(() => {});
   }
 
-  private async cleanupRelay() {
-    if (!this.relayPaths.length) return;
-    const paths = this.relayPaths;
-    this.relayPaths = [];
-    await supabase.storage.from(RELAY_BUCKET).remove(paths).catch(() => {});
+  private cleanupRelay() {
+    if (!this.relayUrls.length) return;
+    const urls = this.relayUrls;
+    this.relayUrls = [];
+    for (const url of urls) {
+      fetch("/api/relay/delete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url }),
+      }).catch(() => {});
+    }
   }
 
   close() {
+    this.closed = true;
     if (this.helloTimer) clearInterval(this.helloTimer);
+    if (this.pollTimer) clearInterval(this.pollTimer);
     this.cleanupRelay();
     try {
       this.dc?.close();
@@ -343,8 +392,6 @@ export class SyncSession {
     } catch {
       /* ignore */
     }
-    if (this.ch) supabase.removeChannel(this.ch);
-    this.ch = null;
     this.h.onState?.("closed");
   }
 }
