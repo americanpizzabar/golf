@@ -22,89 +22,17 @@ import {
 } from "@/lib/golf";
 import { fetchBallShots, saveBallShot, fetchSwings } from "@/lib/db";
 import type { BallShot, BallShape, Swing } from "@/lib/types";
+import {
+  findMovingBlobs,
+  extractTrajectory,
+  type Detection,
+  type RawBlob,
+  type Trajectory,
+} from "@/lib/tracer";
 
 interface Pt {
   x: number;
   y: number;
-}
-
-interface Blob {
-  x: number; // normalized centroid
-  y: number;
-  size: number;
-  score: number;
-  moved: boolean;
-}
-
-// Find moving blobs of ANY color (golf balls may be white, yellow, orange…).
-// Outdoors the struck ball is identified by SPEED + trajectory continuity, not
-// color: here we extract small, compact moving regions; the caller picks the
-// fastest-moving one as the ball.
-function findMovingBlobs(
-  cur: Uint8ClampedArray,
-  prev: Uint8ClampedArray,
-  w: number,
-  h: number,
-): Blob[] {
-  const n = w * h;
-  const mask = new Uint8Array(n);
-  for (let p = 0, i = 0; p < n; p++, i += 4) {
-    // Frame difference (motion). A fast ball produces a strong local change.
-    const d =
-      Math.abs(cur[i] - prev[i]) + Math.abs(cur[i + 1] - prev[i + 1]) + Math.abs(cur[i + 2] - prev[i + 2]);
-    if (d > 60) mask[p] = 1;
-  }
-
-  const BALL_MIN = 2;
-  const BALL_MAX = 150; // a small object; the body/club connect into larger blobs
-  const blobs: Blob[] = [];
-  const stack = new Int32Array(n);
-  const seen = new Uint8Array(n);
-  for (let start = 0; start < n; start++) {
-    if (!mask[start] || seen[start]) continue;
-    let sp = 0;
-    stack[sp++] = start;
-    seen[start] = 1;
-    let count = 0;
-    let sumX = 0;
-    let sumY = 0;
-    let minX = w;
-    let maxX = 0;
-    let minY = h;
-    let maxY = 0;
-    while (sp > 0) {
-      const p = stack[--sp];
-      const px = p % w;
-      const py = (p / w) | 0;
-      count++;
-      sumX += px;
-      sumY += py;
-      if (px < minX) minX = px;
-      if (px > maxX) maxX = px;
-      if (py < minY) minY = py;
-      if (py > maxY) maxY = py;
-      if (px > 0 && mask[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack[sp++] = p - 1; }
-      if (px < w - 1 && mask[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack[sp++] = p + 1; }
-      if (py > 0 && mask[p - w] && !seen[p - w]) { seen[p - w] = 1; stack[sp++] = p - w; }
-      if (py < h - 1 && mask[p + w] && !seen[p + w]) { seen[p + w] = 1; stack[sp++] = p + w; }
-    }
-    if (count < BALL_MIN || count > BALL_MAX) continue;
-    const bw = maxX - minX + 1;
-    const bh = maxY - minY + 1;
-    const aspect = bw / bh;
-    if (aspect < 0.25 || aspect > 4) continue; // allow some motion-blur streaking
-    const fill = count / (bw * bh);
-    if (fill < 0.3) continue;
-    blobs.push({
-      x: sumX / count / w,
-      y: sumY / count / h,
-      size: count,
-      score: fill - count / (BALL_MAX * 2), // prefer small & compact
-      moved: true,
-    });
-  }
-  blobs.sort((a, b) => b.score - a.score);
-  return blobs;
 }
 
 export default function TracerPage() {
@@ -148,14 +76,23 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const diffRef = useRef<HTMLCanvasElement | null>(null);
   const prevRef = useRef<Uint8ClampedArray | null>(null);
   const rafRef = useRef(0);
-  const activeRef = useRef(false);
-  const ptsRef = useRef<Pt[]>([]);
-  const velRef = useRef<Pt>({ x: 0, y: 0 });
-  const prevBlobsRef = useRef<Blob[]>([]); // last frame's moving blobs
-  const lastSeenRef = useRef(0);
-  const startMsRef = useRef(0);
-  const [tracking, setTracking] = useState(false);
 
+  // Rolling buffer of EVERY moving-blob candidate (ball + noise) with timestamps.
+  const bufferRef = useRef<Detection[]>([]);
+  const prevBlobsRef = useRef<RawBlob[]>([]); // previous frame's blobs (visual launch)
+  const t0Ref = useRef<number | null>(null); // armed impact time (s), null = watching
+  const analyzeAtRef = useRef(0); // perf-ms at which to run backward verification
+  const revealRef = useRef<{ traj: Trajectory; shape: BallShape; start: number } | null>(null);
+
+  // Impact-sound detection (layer 2): a sharp audio transient sets t0.
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const audioBufRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const soundBaseRef = useRef(0.02);
+  const lastImpactRef = useRef(0);
+
+  const [phase, setPhase] = useState<"watching" | "capturing">("watching");
+  const [micOn, setMicOn] = useState(false);
   const [camOn, setCamOn] = useState(false);
   const [club, setClub] = useState("DR");
   const [headSpeed, setHeadSpeed] = useState(0); // 0 = use default
@@ -168,9 +105,17 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     pts: Pt[];
   } | null>(null);
   const clubRef = useRef(club);
-  useEffect(() => {
-    clubRef.current = club;
-  }, [club]);
+  const headSpeedRef = useRef(headSpeed);
+  useEffect(() => { clubRef.current = club; }, [club]);
+  useEffect(() => { headSpeedRef.current = headSpeed; }, [headSpeed]);
+
+  // Buffer / flight-window timing (seconds unless suffixed _MS).
+  const BUFFER_S = 3.6; // how much history to retain
+  const PRE_S = 0.3; // include just before impact (catches the launch frame)
+  const MAX_FLIGHT_S = 2.2; // longest plausible flight to inspect
+  const ANALYZE_DELAY_MS = 1700; // "verify the past from the future" delay (~1.7s)
+  const REVEAL_MS = 750; // dramatic line-grow animation
+  const LAUNCH = 0.05; // visual-launch displacement / frame (fallback trigger)
 
   // Pre-fill head speed from the latest analyzed swing of this club.
   useEffect(() => {
@@ -183,6 +128,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
 
   useEffect(() => () => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
+    audioCtxRef.current?.close().catch(() => {});
     cancelAnimationFrame(rafRef.current);
   }, []);
 
@@ -192,16 +138,18 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       return;
     }
     let s: MediaStream | null = null;
-    try {
-      s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } }, audio: false });
-    } catch {
-      try {
-        s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      } catch {
-        alert("カメラを起動できませんでした。");
-        return;
-      }
+    // Request audio too so the impact-sound trigger can work; degrade to
+    // video-only (visual-launch trigger) if the mic is unavailable/denied.
+    const tries: MediaStreamConstraints[] = [
+      { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } }, audio: true },
+      { video: true, audio: true },
+      { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } }, audio: false },
+      { video: true, audio: false },
+    ];
+    for (const c of tries) {
+      try { s = await navigator.mediaDevices.getUserMedia(c); break; } catch { /* next */ }
     }
+    if (!s) { alert("カメラを起動できませんでした。"); return; }
     streamRef.current = s;
     if (videoRef.current) {
       videoRef.current.srcObject = s;
@@ -214,11 +162,35 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       c.height = 120;
       diffRef.current = c;
     }
+    // Set up impact-sound analyser if we captured an audio track.
+    setMicOn(false);
+    if (s.getAudioTracks().length) {
+      try {
+        const AC =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (AC) {
+          const actx = new AC();
+          await actx.resume().catch(() => {});
+          const src = actx.createMediaStreamSource(s);
+          const an = actx.createAnalyser();
+          an.fftSize = 1024;
+          src.connect(an);
+          audioCtxRef.current = actx;
+          analyserRef.current = an;
+          audioBufRef.current = new Uint8Array(an.fftSize);
+          soundBaseRef.current = 0.02;
+          setMicOn(true);
+        }
+      } catch { setMicOn(false); }
+    }
     prevRef.current = null;
-    activeRef.current = false;
-    ptsRef.current = [];
+    bufferRef.current = [];
     prevBlobsRef.current = [];
-    setTracking(false);
+    t0Ref.current = null;
+    revealRef.current = null;
+    lastImpactRef.current = 0;
+    setPhase("watching");
     setResult(null);
     setCamOn(true);
     rafRef.current = requestAnimationFrame(loop);
@@ -227,8 +199,13 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   function stopCam() {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
+    analyserRef.current = null;
     cancelAnimationFrame(rafRef.current);
-    setTracking(false);
+    revealRef.current = null;
+    t0Ref.current = null;
+    setPhase("watching");
     setCamOn(false);
   }
 
@@ -247,103 +224,101 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
         dctx.drawImage(video, 0, 0, dc.width, dc.height);
         const cur = dctx.getImageData(0, 0, dc.width, dc.height);
         const prev = prevRef.current;
-        if (prev) detectStep(cur.data, prev, dc.width, dc.height, now);
+        if (prev) captureStep(cur.data, prev, dc.width, dc.height, now);
         prevRef.current = cur.data.slice(0);
-        // draw tracer overlay
+
+        // Render: NOTHING during flight/verification (no garbage lines). Only a
+        // validated trajectory is ever drawn, as a delayed dramatic reveal.
         octx.clearRect(0, 0, canvas.width, canvas.height);
-        if (ptsRef.current.length > 1) drawTracer(octx, canvas.width, canvas.height, ptsRef.current);
+        if (revealRef.current) drawReveal(octx, canvas.width, canvas.height, now);
       }
     }
     rafRef.current = requestAnimationFrame(loop);
   }
 
-  // Launch when a small blob suddenly moves fast (the struck ball is by far the
-  // fastest object in frame); confirmed by trajectory length in finalize().
-  const LAUNCH = 0.035; // normalized displacement / frame
-  const GATE = 0.34; // tracking search radius
+  function captureStep(cur: Uint8ClampedArray, prev: Uint8ClampedArray, w: number, h: number, now: number) {
+    const tSec = now / 1000;
+    const blobs = findMovingBlobs(cur, prev, w, h);
 
-  function detectStep(cur: Uint8ClampedArray, prev: Uint8ClampedArray, w: number, h: number, now: number) {
-    const moving = findMovingBlobs(cur, prev, w, h);
-
-    if (activeRef.current) {
-      // Track the ball: nearest moving blob to the predicted (vel-extrapolated) spot.
-      const last = ptsRef.current[ptsRef.current.length - 1];
-      const pred = { x: last.x + velRef.current.x, y: last.y + velRef.current.y };
-      let best: Blob | null = null;
-      let bd = GATE;
-      for (const b of moving) {
-        const d = Math.hypot(b.x - pred.x, b.y - pred.y);
-        if (d < bd) {
-          bd = d;
-          best = b;
-        }
-      }
-      if (best) {
-        velRef.current = { x: best.x - last.x, y: best.y - last.y };
-        ptsRef.current.push({ x: best.x, y: best.y });
-        lastSeenRef.current = now;
-      }
-      if (now - lastSeenRef.current > 180 || now - startMsRef.current > 2500) finalize();
-      prevBlobsRef.current = moving;
-      return;
+    // Buffer all candidates, then prune to the rolling window.
+    for (const b of blobs) bufferRef.current.push({ ...b, t: tSec });
+    const cutoff = tSec - BUFFER_S;
+    if (bufferRef.current.length > 4000 || (bufferRef.current[0]?.t ?? tSec) < cutoff) {
+      bufferRef.current = bufferRef.current.filter((d) => d.t >= cutoff);
     }
 
-    // Idle: find the blob that just moved the FASTEST (largest displacement from
-    // any blob in the previous frame) — that's the launched ball.
-    let launchBlob: Blob | null = null;
-    let launchFrom: Pt | null = null;
-    let bestDisp = LAUNCH;
-    for (const b of moving) {
-      let near = 1;
-      let from: Pt | null = null;
-      for (const pb of prevBlobsRef.current) {
-        const d = Math.hypot(b.x - pb.x, b.y - pb.y);
-        if (d < near) {
-          near = d;
-          from = { x: pb.x, y: pb.y };
-        }
-      }
-      if (near > bestDisp && near < 0.45) {
-        bestDisp = near;
-        launchBlob = b;
-        launchFrom = from;
-      }
+    if (t0Ref.current == null) {
+      // Layer 2: impact sound. Layer (fallback): visual launch.
+      if (!detectImpactSound(now)) tryVisualLaunch(blobs, now);
+    } else if (now >= analyzeAtRef.current) {
+      analyze();
     }
-    if (launchBlob) {
-      activeRef.current = true;
-      ptsRef.current = launchFrom
-        ? [launchFrom, { x: launchBlob.x, y: launchBlob.y }]
-        : [{ x: launchBlob.x, y: launchBlob.y }];
-      velRef.current = launchFrom
-        ? { x: launchBlob.x - launchFrom.x, y: launchBlob.y - launchFrom.y }
-        : { x: 0, y: 0 };
-      lastSeenRef.current = now;
-      startMsRef.current = now;
-      setTracking(true);
-    }
-    prevBlobsRef.current = moving;
+    prevBlobsRef.current = blobs;
   }
 
-  function finalize() {
-    activeRef.current = false;
-    prevBlobsRef.current = [];
-    setTracking(false);
-    const pts = ptsRef.current.slice();
-    ptsRef.current = [];
-    if (pts.length < 4) return; // too few points to be a real ball flight
-    // Curvature: signed horizontal deviation of the apex from the launch→end line.
-    const a = pts[0];
-    const b = pts[pts.length - 1];
-    let maxDev = 0;
-    for (const p of pts) {
-      const t = b.x - a.x !== 0 ? (p.x - a.x) / (b.x - a.x) : 0;
-      const lineX = a.x + (b.x - a.x) * t;
-      const dev = p.x - lineX;
-      if (Math.abs(dev) > Math.abs(maxDev)) maxDev = dev;
+  // Sharp audio transient → impact. Returns true if it armed this frame.
+  function detectImpactSound(now: number): boolean {
+    const an = analyserRef.current;
+    const buf = audioBufRef.current;
+    if (!an || !buf) return false;
+    an.getByteTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const x = (buf[i] - 128) / 128;
+      sum += x * x;
     }
-    const shape = classifyShape(maxDev);
-    const est = estimateBall(clubRef.current, headSpeed);
-    setResult({ shape, apex: est.apex, carry: est.carry, ballSpeed: est.ballSpeed, smash: est.smash, pts });
+    const rms = Math.sqrt(sum / buf.length);
+    const base = soundBaseRef.current;
+    soundBaseRef.current = base * 0.95 + rms * 0.05; // slow ambient baseline
+    if (rms > Math.max(0.07, base * 4) && now - lastImpactRef.current > 1200) {
+      lastImpactRef.current = now;
+      arm(now);
+      return true;
+    }
+    return false;
+  }
+
+  // A small blob that jumped far since last frame = the struck ball launching.
+  function tryVisualLaunch(blobs: RawBlob[], now: number) {
+    let bestDisp = LAUNCH;
+    let launched = false;
+    for (const b of blobs) {
+      let near = 1;
+      for (const pb of prevBlobsRef.current) {
+        const d = Math.hypot(b.x - pb.x, b.y - pb.y);
+        if (d < near) near = d;
+      }
+      if (near > bestDisp && near < 0.45) { bestDisp = near; launched = true; }
+    }
+    if (launched) arm(now);
+  }
+
+  function arm(now: number) {
+    if (t0Ref.current != null) return;
+    t0Ref.current = now / 1000;
+    analyzeAtRef.current = now + ANALYZE_DELAY_MS;
+    revealRef.current = null; // clear any previous trace
+    setResult(null);
+    setPhase("capturing");
+  }
+
+  // Backward verification: recover the one physically-valid flight from the
+  // buffered window, or discard silently (no false line).
+  function analyze() {
+    const t0 = t0Ref.current;
+    t0Ref.current = null;
+    setPhase("watching");
+    if (t0 == null) return;
+    const lo = t0 - PRE_S;
+    const hi = t0 + MAX_FLIGHT_S;
+    const dets = bufferRef.current.filter((d) => d.t >= lo && d.t <= hi);
+    const traj = extractTrajectory(dets);
+    if (!traj) return; // noise only → draw nothing
+
+    const shape = classifyShape(traj.maxDev);
+    const est = estimateBall(clubRef.current, headSpeedRef.current);
+    revealRef.current = { traj, shape, start: performance.now() };
+    setResult({ shape, apex: est.apex, carry: est.carry, ballSpeed: est.ballSpeed, smash: est.smash, pts: traj.pts });
     if (navigator.vibrate) navigator.vibrate(20);
     saveBallShot({
       club: clubRef.current,
@@ -353,34 +328,57 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       ball_speed: est.ballSpeed,
       head_speed: est.headSpeed,
       smash: est.smash,
-      curve_px: Math.round(maxDev * 1000) / 1000,
+      curve_px: Math.round(traj.maxDev * 1000) / 1000,
     }).then(() => onSaved());
   }
 
-  function drawTracer(ctx: CanvasRenderingContext2D, w: number, h: number, pts: Pt[]) {
-    const col = result ? shapeColor(result.shape) : "#22d3ee";
+  // Dramatic reveal: the light line streaks from launch to landing (the "シュワッ"
+  // effect), parametrised by an eased progress over REVEAL_MS, then holds.
+  function drawReveal(ctx: CanvasRenderingContext2D, w: number, h: number, now: number) {
+    const rv = revealRef.current!;
+    const pts = rv.traj.pts;
+    if (pts.length < 2) return;
+    const raw = Math.max(0, Math.min(1, (now - rv.start) / REVEAL_MS));
+    const p = raw * raw * (3 - 2 * raw); // smoothstep
+    const col = shapeColor(rv.shape);
+    const head = p * (pts.length - 1);
+    const upto = Math.floor(head);
+
     ctx.save();
-    ctx.shadowBlur = Math.max(8, w / 90);
+    ctx.shadowBlur = Math.max(8, w / 80);
     ctx.shadowColor = col;
     ctx.strokeStyle = col;
-    ctx.lineWidth = Math.max(3, w / 180);
+    ctx.lineWidth = Math.max(3, w / 170);
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(pts[0].x * w, pts[0].y * h);
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x * w, pts[i].y * h);
-    ctx.stroke();
-    // apex tag
-    let apexI = 0;
-    pts.forEach((p, i) => {
-      if (p.y < pts[apexI].y) apexI = i;
-    });
-    const ap = pts[apexI];
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "#fff";
-    ctx.beginPath();
-    ctx.arc(ap.x * w, ap.y * h, Math.max(4, w / 150), 0, Math.PI * 2);
-    ctx.fill();
+    for (let i = 1; i <= upto; i++) ctx.lineTo(pts[i].x * w, pts[i].y * h);
+    // partial segment to the moving head
+    if (upto < pts.length - 1) {
+      const f = head - upto;
+      const hx = (pts[upto].x + (pts[upto + 1].x - pts[upto].x) * f) * w;
+      const hy = (pts[upto].y + (pts[upto + 1].y - pts[upto].y) * f) * h;
+      ctx.lineTo(hx, hy);
+      ctx.stroke();
+      // leading comet dot
+      ctx.shadowBlur = Math.max(10, w / 60);
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.arc(hx, hy, Math.max(3, w / 150), 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.stroke();
+      // apex marker once fully revealed
+      let apexI = 0;
+      pts.forEach((pt, i) => { if (pt.y < pts[apexI].y) apexI = i; });
+      const ap = pts[apexI];
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.arc(ap.x * w, ap.y * h, Math.max(4, w / 150), 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.restore();
   }
 
@@ -399,15 +397,21 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
                 <p className="text-sm" style={{ color: "var(--muted)" }}>
                   飛球線の後方から、ボールと打ち出し方向が<br />
                   両方映るようにカメラを固定してください。<br />
-                  打つと弾道を自動で検知・描画します（屋外OK）。
+                  打つと弾道を物理検証し、約1.5秒後に描画します（屋外OK）。
                 </p>
               </div>
             </div>
           )}
           {camOn && (
             <div className="absolute top-2 left-2 px-3 py-1 rounded-full text-xs font-bold"
-              style={{ background: "rgba(0,0,0,0.6)", color: tracking ? "#4ade80" : "#fff" }}>
-              {tracking ? "● 弾道を追跡中…" : "○ 監視中 — 打ってください"}
+              style={{ background: "rgba(0,0,0,0.6)", color: phase === "capturing" ? "#fbbf24" : "#fff" }}>
+              {phase === "capturing" ? "● 弾道を物理検証中…" : "○ 監視中 — 打ってください"}
+            </div>
+          )}
+          {camOn && (
+            <div className="absolute bottom-2 left-2 px-2.5 py-1 rounded-full text-[10px] font-bold"
+              style={{ background: "rgba(0,0,0,0.55)", color: micOn ? "#4ade80" : "#9ca3af" }}>
+              {micOn ? "🎙 打音同期 ON" : "🎙 打音OFF（映像検知）"}
             </div>
           )}
           {camOn && (
@@ -475,9 +479,9 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       )}
 
       <p className="text-[11px] leading-relaxed px-1" style={{ color: "var(--muted)" }}>
-        ※ ボールの色は問いません。打ち出された「小さく速く動く物体」を弾道として追跡し、球筋（ストレート/ドロー/フェード/スライス/フック）を判定します。
-        カメラは三脚等で固定すると精度が上がります（手ブレ・強風で背景が大きく動くと検知しにくくなります）。
-        飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（クラブ非検出のためβ）。
+        ※ 飛行中は線を描かず、打球の候補を一旦すべて記録 → 物理法則（放物線・重力）に合致する軌道だけを逆算抽出し、約1.5秒後にトレーサーを描画します。
+        これにより風で揺れるネット・木々・人・影などのノイズを誤検知しません。打音（マイク）が使える場合はインパクトを基準に時間枠を絞り精度が上がります。
+        飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（β）。
       </p>
     </div>
   );
