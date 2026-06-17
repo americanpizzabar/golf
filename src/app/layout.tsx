@@ -1,11 +1,12 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import BottomNav from "@/components/BottomNav";
+import { LanguageProvider } from "@/lib/i18n";
 
 export const metadata: Metadata = {
-  title: "SwingSync — AIゴルフ分析",
+  title: "SwingSync — AI Golf Analysis",
   description:
-    "スマホのカメラでスイングを骨格解析。理想のプロとのシンクロ率、アプローチ成功率、AIコーチの練習メニューまで。",
+    "Analyze your swing from your phone camera with pose tracking. Sync rate vs. your ideal pro, approach success rate, and AI coaching menus.",
 };
 
 export const viewport: Viewport = {
@@ -19,10 +20,12 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="ja" className="h-full antialiased">
+    <html lang="en" className="h-full antialiased">
       <body className="min-h-full">
-        <div className="app-shell">{children}</div>
-        <BottomNav />
+        <LanguageProvider>
+          <div className="app-shell">{children}</div>
+          <BottomNav />
+        </LanguageProvider>
       </body>
     </html>
   );

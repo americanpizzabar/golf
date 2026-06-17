@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, SeverityBadge } from "@/components/ui";
+import { useT } from "@/lib/i18n";
 import { drawSkeleton, type Frame } from "@/lib/pose";
 import { detectEvents, EVENT_NAMES } from "@/lib/ghost-sync";
 import type { Clip } from "@/lib/clip";
@@ -11,6 +12,7 @@ type Slot = "front" | "dtl";
 const SLOT_LABEL: Record<Slot, string> = { front: "正面", dtl: "後方(DTL)" };
 
 export function SyncBadge({ front, dtl }: { front: Clip; dtl: Clip }) {
+  const t = useT();
   const bothAudio = front.impactSource === "audio" && dtl.impactSource === "audio";
   return (
     <Card className="py-3">
@@ -19,12 +21,12 @@ export function SyncBadge({ front, dtl }: { front: Clip; dtl: Clip }) {
           className="px-1.5 py-0.5 rounded text-[10px] font-bold"
           style={{ background: bothAudio ? "var(--green)" : "var(--amber)", color: "#03260f" }}
         >
-          {bothAudio ? "打音シンクロ" : "骨格シンクロ"}
+          {bothAudio ? t("打音シンクロ") : t("骨格シンクロ")}
         </span>
         <span style={{ color: "var(--muted)" }}>
           {bothAudio
-            ? "両動画のインパクト打音でミリ秒同期しました。"
-            : "音声が弱いため、一部は骨格の最速点で同期しています。下のスライダーで微調整できます。"}
+            ? t("両動画のインパクト打音でミリ秒同期しました。")
+            : t("音声が弱いため、一部は骨格の最速点で同期しています。下のスライダーで微調整できます。")}
         </span>
       </div>
     </Card>
@@ -47,6 +49,7 @@ export function TwinPlayer({
   dtl: Clip;
   leftHanded: boolean;
 }) {
+  const t = useT();
   const vF = useRef<HTMLVideoElement>(null);
   const vB = useRef<HTMLVideoElement>(null);
   const cF = useRef<HTMLCanvasElement>(null);
@@ -252,7 +255,7 @@ export function TwinPlayer({
           className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold"
           style={{ background: slot === "front" ? "#22d3ee" : "#22c55e", color: "#04121f" }}
         >
-          {SLOT_LABEL[slot]}
+          {t(SLOT_LABEL[slot])}
         </span>
       </div>
     );
@@ -262,10 +265,9 @@ export function TwinPlayer({
     <Card className="p-3">
       <div className="flex items-center justify-between mb-2">
         <div className="text-xs font-bold">
-          {eventName(tau)}{" "}
+          {t(eventName(tau))}{" "}
           <span style={{ color: "var(--muted)" }}>
-            （IMP {tau >= 0 ? "+" : ""}
-            {Math.round(tau * 1000)}ms）
+            {t("（IMP {ms}ms）", { ms: (tau >= 0 ? "+" : "") + Math.round(tau * 1000) })}
           </span>
         </div>
         <div className="flex gap-1">
@@ -279,7 +281,7 @@ export function TwinPlayer({
                 color: layout === l ? "#03260f" : "var(--muted)",
               }}
             >
-              {l === "row" ? "左右" : "上下"}
+              {l === "row" ? t("左右") : t("上下")}
             </button>
           ))}
         </div>
@@ -295,7 +297,7 @@ export function TwinPlayer({
         <button
           onClick={() => seek(tauRef.current - STEP)}
           className="btn btn-ghost w-9 h-9 grid place-items-center"
-          aria-label="1コマ戻る"
+          aria-label={t("1コマ戻る")}
         >
           ◀
         </button>
@@ -308,7 +310,7 @@ export function TwinPlayer({
         <button
           onClick={() => seek(tauRef.current + STEP)}
           className="btn btn-ghost w-9 h-9 grid place-items-center"
-          aria-label="1コマ進む"
+          aria-label={t("1コマ進む")}
         >
           ▶|
         </button>
@@ -348,7 +350,7 @@ export function TwinPlayer({
             color: showSkel ? "#04121f" : "var(--muted)",
           }}
         >
-          骨格 {showSkel ? "ON" : "OFF"}
+          {t("骨格")} {showSkel ? "ON" : "OFF"}
         </button>
       </div>
 
@@ -367,7 +369,7 @@ export function TwinPlayer({
                 color: active ? "#04121f" : "var(--muted)",
               }}
             >
-              {name}
+              {t(name)}
             </button>
           );
         })}
@@ -376,10 +378,14 @@ export function TwinPlayer({
       {/* Fine-tune offset */}
       <div className="mt-3">
         <div className="flex items-center justify-between text-[11px]" style={{ color: "var(--muted)" }}>
-          <span>同期の微調整（後方を {offsetMs >= 0 ? "+" : ""}{offsetMs}ms ずらす）</span>
+          <span>
+            {t("同期の微調整（後方を {ms}ms ずらす）", {
+              ms: (offsetMs >= 0 ? "+" : "") + offsetMs,
+            })}
+          </span>
           {offsetMs !== 0 && (
             <button onClick={() => setOffsetMs(0)} style={{ color: "var(--green)" }}>
-              リセット
+              {t("リセット")}
             </button>
           )}
         </div>
@@ -395,8 +401,10 @@ export function TwinPlayer({
       </div>
 
       <p className="text-[10px] mt-2" style={{ color: "var(--muted)" }}>
-        打音を基準に2本を整列。スライダーや◀▶で約{Math.round(STEP * 1000)}msずつ、正面・後方を同時に
-        スロー再生・巻き戻しできます。骨格オーバーレイは端末内推定です。
+        {t(
+          "打音を基準に2本を整列。スライダーや◀▶で約{ms}msずつ、正面・後方を同時にスロー再生・巻き戻しできます。骨格オーバーレイは端末内推定です。",
+          { ms: Math.round(STEP * 1000) },
+        )}
       </p>
     </Card>
   );
@@ -410,12 +418,13 @@ const sevColor: Record<string, string> = {
 };
 
 export function CrossReport({ result }: { result: CrossResult }) {
+  const t = useT();
   return (
     <>
       <Card>
-        <div className="text-sm font-bold mb-1">🔬 クロスアングル診断</div>
+        <div className="text-sm font-bold mb-1">🔬 {t("クロスアングル診断")}</div>
         <p className="text-[11px] mb-3" style={{ color: "var(--muted)" }}>
-          正面と後方を組み合わせて初めて分かる「立体的なスイングエラー」の真因です。
+          {t("正面と後方を組み合わせて初めて分かる「立体的なスイングエラー」の真因です。")}
         </p>
         <div className="space-y-3">
           {result.findings.map((f) => (
@@ -431,19 +440,19 @@ export function CrossReport({ result }: { result: CrossResult }) {
               <div className="space-y-1 text-[12px]">
                 <div className="flex gap-1.5">
                   <span className="font-bold shrink-0" style={{ color: "#22d3ee" }}>
-                    正面
+                    {t("正面")}
                   </span>
                   <span style={{ color: "var(--muted)" }}>{f.front.replace(/^正面[：:]\s*/, "")}</span>
                 </div>
                 <div className="flex gap-1.5">
                   <span className="font-bold shrink-0" style={{ color: "#22c55e" }}>
-                    後方
+                    {t("後方")}
                   </span>
                   <span style={{ color: "var(--muted)" }}>{f.dtl.replace(/^後方[：:]\s*/, "")}</span>
                 </div>
                 <div className="mt-1.5 pt-1.5" style={{ borderTop: "1px solid var(--line)" }}>
                   <span className="font-bold" style={{ color: "var(--fg)" }}>
-                    真因 ▶︎{" "}
+                    {t("真因 ▶︎")}{" "}
                   </span>
                   <span>{f.truth}</span>
                 </div>
@@ -456,29 +465,29 @@ export function CrossReport({ result }: { result: CrossResult }) {
 
       <Card>
         <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-          計測値（アドレス→インパクト）
+          {t("計測値（アドレス→インパクト）")}
         </div>
         <div className="grid grid-cols-2 gap-3 text-[12px]">
           <div>
             <div className="font-bold mb-1" style={{ color: "#22d3ee" }}>
-              正面ビュー
+              {t("正面ビュー")}
             </div>
-            <Row label="頭の上下動" value={`${result.front.headDropCm} cm`} />
-            <Row label="腰の横移動" value={`${result.front.swayCm} cm`} />
+            <Row label={t("頭の上下動")} value={`${result.front.headDropCm} cm`} />
+            <Row label={t("腰の横移動")} value={`${result.front.swayCm} cm`} />
           </div>
           <div>
             <div className="font-bold mb-1" style={{ color: "#22c55e" }}>
-              後方ビュー
+              {t("後方ビュー")}
             </div>
             <Row
-              label="前傾角の変化"
+              label={t("前傾角の変化")}
               value={`${result.dtl.spineDelta >= 0 ? "+" : ""}${result.dtl.spineDelta}°`}
             />
-            <Row label="お尻の前後動" value={`${result.dtl.hipMoveCm} cm`} />
+            <Row label={t("お尻の前後動")} value={`${result.dtl.hipMoveCm} cm`} />
           </div>
         </div>
         <p className="text-[10px] mt-2" style={{ color: "var(--muted)" }}>
-          ※ 2D骨格からの推定値です。被写体の大きさ・撮影角度で多少前後します。
+          {t("※ 2D骨格からの推定値です。被写体の大きさ・撮影角度で多少前後します。")}
         </p>
       </Card>
     </>

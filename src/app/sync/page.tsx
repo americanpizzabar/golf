@@ -9,6 +9,7 @@ import { crossAnalyze, type CrossResult } from "@/lib/cross-angle";
 import { TwinPlayer, CrossReport, SyncBadge } from "@/components/CrossPlayer";
 import { CrossHistory } from "@/components/CrossHistory";
 import { SyncSession, type SyncState, type Transport } from "@/lib/sync-session";
+import { useT } from "@/lib/i18n";
 
 type Mode = "choose" | "host" | "guest";
 type Stage = "live" | "analyzing" | "result";
@@ -35,6 +36,7 @@ function pickMime(): string {
 }
 
 export default function SyncPage() {
+  const t = useT();
   const [mode, setMode] = useState<Mode>("choose");
   const [stage, setStage] = useState<Stage>("live");
   const [code, setCode] = useState("");
@@ -111,7 +113,7 @@ export default function SyncPage() {
       }
       return true;
     } catch {
-      setErr("カメラ/マイクを利用できませんでした。ブラウザの権限を許可してください。");
+      setErr(t("カメラ/マイクを利用できませんでした。ブラウザの権限を許可してください。"));
       return false;
     }
   }
@@ -127,7 +129,7 @@ export default function SyncPage() {
     try {
       mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
     } catch {
-      setErr("この端末では録画(MediaRecorder)に対応していません。");
+      setErr(t("この端末では録画(MediaRecorder)に対応していません。"));
       return;
     }
     mr.ondataavailable = (e) => {
@@ -158,11 +160,11 @@ export default function SyncPage() {
   function onLocalRecordingDone(blob: Blob) {
     if (mode === "guest") {
       // Send the clip to the host over the data channel.
-      setStatus("親機へ送信中…");
-      sessionRef.current?.sendClip("child", blob).then(() => setStatus("送信完了 ✓"));
+      setStatus(t("親機へ送信中…"));
+      sessionRef.current?.sendClip("child", blob).then(() => setStatus(t("送信完了 ✓")));
     } else {
       // Host: maybe both clips are ready now.
-      setStatus(remoteBlobRef.current ? "両動画そろいました" : "子機の録画/送信を待っています…");
+      setStatus(remoteBlobRef.current ? t("両動画そろいました") : t("子機の録画/送信を待っています…"));
       maybeAnalyze();
     }
   }
@@ -171,7 +173,7 @@ export default function SyncPage() {
   function hostStartRecord() {
     sessionRef.current?.send({ t: "start" });
     startRecording();
-    setStatus("録画中（親機・子機 同時）");
+    setStatus(t("録画中（親機・子機 同時）"));
   }
   function hostStopRecord() {
     sessionRef.current?.send({ t: "stop" });
@@ -189,14 +191,14 @@ export default function SyncPage() {
       const hr = hostRoleRef.current;
       const frontBlob = hr === "front" ? local : remote;
       const dtlBlob = hr === "front" ? remote : local;
-      setPhase("正面動画を解析中…");
+      setPhase(t("正面動画を解析中…"));
       setPct(0);
       const front = await extractClip(frontBlob, model, leftRef.current, setPct);
-      setPhase("後方動画を解析中…");
+      setPhase(t("後方動画を解析中…"));
       setPct(0);
       const dtl = await extractClip(dtlBlob, model, leftRef.current, setPct);
       if (front.frames.length < 5 || dtl.frames.length < 5) {
-        setErr("骨格を十分に検出できませんでした。全身が大きく・明るく映るよう撮り直してください。");
+        setErr(t("骨格を十分に検出できませんでした。全身が大きく・明るく映るよう撮り直してください。"));
         URL.revokeObjectURL(front.url);
         URL.revokeObjectURL(dtl.url);
         setStage("live");
@@ -216,9 +218,10 @@ export default function SyncPage() {
       setStage("result");
     } catch (e) {
       console.error(e);
-      setErr("解析中にエラーが発生しました。");
+      setErr(t("解析中にエラーが発生しました。"));
       setStage("live");
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage]);
 
   // --- Session handlers ----------------------------------------------------
@@ -231,11 +234,11 @@ export default function SyncPage() {
           const gr: Angle = hostRoleRef.current === "front" ? "dtl" : "front";
           setGuestRole(gr);
           sessionRef.current?.send({ t: "role", role: gr });
-          setStatus("接続しました。録画ボタンで2台同時に撮影します。");
+          setStatus(t("接続しました。録画ボタンで2台同時に撮影します。"));
         }
-        if (s === "connected" && role === "guest") setStatus("接続しました。親機の操作を待っています…");
+        if (s === "connected" && role === "guest") setStatus(t("接続しました。親機の操作を待っています…"));
         if (s === "failed")
-          setErr("動画の転送に失敗しました。通信環境を確認してもう一度お試しください。");
+          setErr(t("動画の転送に失敗しました。通信環境を確認してもう一度お試しください。"));
       },
       onTransport: (t: Transport) => setTransport(t),
       onMessage: (msg: Record<string, unknown>) => {
@@ -243,7 +246,7 @@ export default function SyncPage() {
           setGuestRole(msg.role);
         } else if (msg.t === "start") {
           startRecording();
-          setStatus("録画中…");
+          setStatus(t("録画中…"));
         } else if (msg.t === "stop") {
           stopRecording();
         }
@@ -258,7 +261,7 @@ export default function SyncPage() {
         if (kind === "child") {
           remoteBlobRef.current = blob;
           setRecvPct(1);
-          setStatus("子機の動画を受信しました");
+          setStatus(t("子機の動画を受信しました"));
           maybeAnalyze();
         }
       },
@@ -279,13 +282,13 @@ export default function SyncPage() {
     const s = new SyncSession(c, "host", buildHandlers("host"));
     sessionRef.current = s;
     await s.start();
-    setStatus("子機の参加を待っています…");
+    setStatus(t("子機の参加を待っています…"));
   }
 
   async function joinSession() {
     setErr("");
     if (!/^\d{6}$/.test(joinCode)) {
-      setErr("6桁のコードを入力してください。");
+      setErr(t("6桁のコードを入力してください。"));
       return;
     }
     setMode("guest");
@@ -295,7 +298,7 @@ export default function SyncPage() {
     const s = new SyncSession(joinCode, "guest", buildHandlers("guest"));
     sessionRef.current = s;
     await s.start();
-    setStatus("親機に接続しています…");
+    setStatus(t("親機に接続しています…"));
   }
 
   function restart() {
@@ -310,7 +313,7 @@ export default function SyncPage() {
     setSendPct(0);
     setErr("");
     setStage("live");
-    setStatus(mode === "host" ? "もう一度、録画ボタンで撮影できます。" : "親機の操作を待っています…");
+    setStatus(mode === "host" ? t("もう一度、録画ボタンで撮影できます。") : t("親機の操作を待っています…"));
   }
 
   function leave() {
@@ -334,8 +337,8 @@ export default function SyncPage() {
   return (
     <main>
       <PageHeader
-        title="シンクロ撮影"
-        subtitle="2台のスマホを6桁コードで繋ぎ、正面×後方を同時録画"
+        title={t("シンクロ撮影")}
+        subtitle={t("2台のスマホを6桁コードで繋ぎ、正面×後方を同時録画")}
         back
       />
       <div className="px-4 space-y-4 pb-8">
@@ -351,28 +354,27 @@ export default function SyncPage() {
         {mode === "choose" && (
           <>
             <Card className="space-y-3">
-              <div className="text-sm font-semibold">2台で同時に撮影する</div>
+              <div className="text-sm font-semibold">{t("2台で同時に撮影する")}</div>
               <p className="text-[12px]" style={{ color: "var(--muted)" }}>
-                片方を「親機」にして6桁コードを発行し、もう片方の「子機」で入力します。親機の録画ボタンで
-                両方が同時に録画され、子機の映像が自動で集約・解析されます。映像は原則端末間で直接送られます。
+                {t("片方を「親機」にして6桁コードを発行し、もう片方の「子機」で入力します。親機の録画ボタンで両方が同時に録画され、子機の映像が自動で集約・解析されます。映像は原則端末間で直接送られます。")}
               </p>
               <button
                 onClick={createSession}
                 className="btn w-full py-2.5 text-sm font-bold"
                 style={{ background: "var(--green)", color: "#03260f" }}
               >
-                親機にする（コードを発行）
+                {t("親機にする（コードを発行）")}
               </button>
             </Card>
             <Card className="space-y-2">
-              <div className="text-sm font-semibold">子機として参加</div>
+              <div className="text-sm font-semibold">{t("子機として参加")}</div>
               <input
                 inputMode="numeric"
                 pattern="\d*"
                 maxLength={6}
                 value={joinCode}
                 onChange={(e) => setJoinCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                placeholder="6桁コード"
+                placeholder={t("6桁コード")}
                 className="w-full px-3 py-2.5 text-center text-lg tracking-[0.3em] font-bold"
               />
               <button
@@ -384,14 +386,12 @@ export default function SyncPage() {
                   color: joinCode.length === 6 ? "#04121f" : "var(--muted)",
                 }}
               >
-                参加する
+                {t("参加する")}
               </button>
             </Card>
             <Card>
               <div className="text-[11px] leading-relaxed" style={{ color: "var(--muted)" }}>
-                💡 三脚やもう1台のスマホを正面・後方に設置し、インパクトの打音がどちらにも入るようにすると
-                同期精度が上がります。映像は<strong>原則として端末間で直接</strong>送られますが、直接つながらない
-                回線では一時的にクラウドを経由（転送後すぐ削除）するので、別々のネットワークでも使えます。
+                💡 {t("三脚やもう1台のスマホを正面・後方に設置し、インパクトの打音がどちらにも入るようにすると同期精度が上がります。映像は")}<strong>{t("原則として端末間で直接")}</strong>{t("送られますが、直接つながらない回線では一時的にクラウドを経由（転送後すぐ削除）するので、別々のネットワークでも使えます。")}
               </div>
             </Card>
             <CrossHistory />
@@ -405,19 +405,19 @@ export default function SyncPage() {
               <div className="flex items-center justify-between">
                 <div className="text-sm">
                   <span style={{ color: "var(--muted)" }}>
-                    {mode === "host" ? "親機" : "子機"}・
+                    {mode === "host" ? t("親機") : t("子機")}・
                   </span>
                   <span
                     className="font-bold"
                     style={{ color: connected ? "var(--green)" : "var(--amber)" }}
                   >
-                    {connected ? "接続済み" : conn === "failed" ? "未接続" : "接続待ち…"}
+                    {connected ? t("接続済み") : conn === "failed" ? t("未接続") : t("接続待ち…")}
                   </span>
                 </div>
                 {mode === "host" && (
                   <div className="text-right">
                     <div className="text-[10px]" style={{ color: "var(--muted)" }}>
-                      接続コード
+                      {t("接続コード")}
                     </div>
                     <div className="text-2xl font-bold tracking-[0.25em]" style={{ color: "var(--cyan)" }}>
                       {code}
@@ -432,17 +432,17 @@ export default function SyncPage() {
               )}
               {connected && (
                 <div className="mt-2 flex items-center gap-1.5 text-[11px]">
-                  <span style={{ color: "var(--muted)" }}>転送経路:</span>
+                  <span style={{ color: "var(--muted)" }}>{t("転送経路:")}</span>
                   {transport === "p2p" ? (
                     <span className="px-1.5 py-0.5 rounded font-bold" style={{ background: "var(--green)", color: "#03260f" }}>
-                      端末間 直接 P2P（高速・非経由）
+                      {t("端末間 直接 P2P（高速・非経由）")}
                     </span>
                   ) : transport === "relay" ? (
                     <span className="px-1.5 py-0.5 rounded font-bold" style={{ background: "var(--amber)", color: "#2a1a00" }}>
-                      クラウド リレー（自動切替）
+                      {t("クラウド リレー（自動切替）")}
                     </span>
                   ) : (
-                    <span style={{ color: "var(--muted)" }}>確立中…</span>
+                    <span style={{ color: "var(--muted)" }}>{t("確立中…")}</span>
                   )}
                 </div>
               )}
@@ -464,7 +464,7 @@ export default function SyncPage() {
                 className="absolute top-2 left-2 px-2 py-0.5 rounded text-[11px] font-bold"
                 style={{ background: "var(--green)", color: "#03260f" }}
               >
-                あなた＝{ANGLE_LABEL[mode === "host" ? hostRole : guestRole]}
+                {t("あなた＝")}{t(ANGLE_LABEL[mode === "host" ? hostRole : guestRole])}
               </span>
               {recording && (
                 <span className="absolute top-2 right-2 px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1" style={{ background: "var(--red)", color: "#fff" }}>
@@ -478,7 +478,7 @@ export default function SyncPage() {
               <Card className="space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs" style={{ color: "var(--muted)" }}>
-                    あなた（親機）のアングル
+                    {t("あなた（親機）のアングル")}
                   </span>
                   <div className="flex gap-1">
                     {(["front", "dtl"] as Angle[]).map((a) => (
@@ -497,7 +497,7 @@ export default function SyncPage() {
                           color: hostRole === a ? "#03260f" : "var(--muted)",
                         }}
                       >
-                        {ANGLE_LABEL[a]}
+                        {t(ANGLE_LABEL[a])}
                       </button>
                     ))}
                   </div>
@@ -512,7 +512,7 @@ export default function SyncPage() {
                       color: connected ? "#fff" : "var(--muted)",
                     }}
                   >
-                    ● 2台同時に録画開始
+                    {t("● 2台同時に録画開始")}
                   </button>
                 ) : (
                   <button
@@ -520,13 +520,13 @@ export default function SyncPage() {
                     className="btn w-full py-3 text-sm font-bold"
                     style={{ background: "var(--fg)", color: "var(--bg)" }}
                   >
-                    ■ 停止して解析
+                    {t("■ 停止して解析")}
                   </button>
                 )}
                 {recvPct > 0 && recvPct < 1 && (
                   <div>
                     <div className="text-[11px] mb-1" style={{ color: "var(--muted)" }}>
-                      子機から受信中… {Math.round(recvPct * 100)}%
+                      {t("子機から受信中… {pct}%", { pct: Math.round(recvPct * 100) })}
                     </div>
                     <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft)" }}>
                       <div className="h-full" style={{ width: `${recvPct * 100}%`, background: "var(--cyan)" }} />
@@ -540,18 +540,18 @@ export default function SyncPage() {
             {mode === "guest" && (
               <Card className="space-y-2">
                 <div className="text-sm">
-                  あなたの担当：
+                  {t("あなたの担当：")}
                   <span className="font-bold ml-1" style={{ color: "var(--cyan)" }}>
-                    {ANGLE_LABEL[guestRole]}
+                    {t(ANGLE_LABEL[guestRole])}
                   </span>
                 </div>
                 <p className="text-[12px]" style={{ color: "var(--muted)" }}>
-                  録画は親機の操作で自動的に始まります。スマホを固定し、全身が画面に大きく入るよう構えてください。
+                  {t("録画は親機の操作で自動的に始まります。スマホを固定し、全身が画面に大きく入るよう構えてください。")}
                 </p>
                 {sendPct > 0 && sendPct < 1 && (
                   <div>
                     <div className="text-[11px] mb-1" style={{ color: "var(--muted)" }}>
-                      親機へ送信中… {Math.round(sendPct * 100)}%
+                      {t("親機へ送信中… {pct}%", { pct: Math.round(sendPct * 100) })}
                     </div>
                     <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft)" }}>
                       <div className="h-full" style={{ width: `${sendPct * 100}%`, background: "var(--green)" }} />
@@ -562,7 +562,7 @@ export default function SyncPage() {
             )}
 
             <button onClick={leave} className="btn btn-ghost w-full py-2 text-xs">
-              セッションを終了
+              {t("セッションを終了")}
             </button>
           </>
         )}
@@ -570,7 +570,7 @@ export default function SyncPage() {
         {/* --- Analyzing (host) --- */}
         {stage === "analyzing" && (
           <Card className="text-center py-8 space-y-3">
-            <Spinner label={phase || "解析中…"} />
+            <Spinner label={phase || t("解析中…")} />
             <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--bg-soft)" }}>
               <div className="h-full transition-all" style={{ width: `${pct}%`, background: "var(--green)" }} />
             </div>
@@ -585,10 +585,10 @@ export default function SyncPage() {
             <CrossReport result={result} />
             <div className="grid grid-cols-2 gap-2">
               <button onClick={restart} className="btn btn-ghost py-2.5 text-sm">
-                もう一度撮影
+                {t("もう一度撮影")}
               </button>
               <button onClick={leave} className="btn btn-ghost py-2.5 text-sm">
-                終了
+                {t("終了")}
               </button>
             </div>
           </>

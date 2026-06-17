@@ -21,6 +21,7 @@ import {
   shapeColor,
 } from "@/lib/golf";
 import { fetchBallShots, saveBallShot, fetchSwings } from "@/lib/db";
+import { useT } from "@/lib/i18n";
 import type { BallShot, BallShape, Swing } from "@/lib/types";
 import {
   findMovingBlobs,
@@ -36,6 +37,7 @@ interface Pt {
 }
 
 export default function TracerPage() {
+  const t = useT();
   const [tab, setTab] = useState<"trace" | "matrix">("trace");
   const [shots, setShots] = useState<BallShot[]>([]);
   const reload = useCallback(async () => setShots(await fetchBallShots(300)), []);
@@ -45,21 +47,21 @@ export default function TracerPage() {
 
   return (
     <main>
-      <PageHeader title="AR弾道トレーサー" subtitle="球筋を判定し弾道を描画（β）" back />
+      <PageHeader title={t("AR弾道トレーサー")} subtitle={t("球筋を判定し弾道を描画（β）")} back />
       <div className="px-4">
         <div className="flex gap-2 mb-4">
-          {(["trace", "matrix"] as const).map((t) => (
+          {(["trace", "matrix"] as const).map((tabId) => (
             <button
-              key={t}
-              onClick={() => setTab(t)}
+              key={tabId}
+              onClick={() => setTab(tabId)}
               className="btn flex-1 py-2.5 text-sm"
               style={{
-                background: tab === t ? "var(--green)" : "var(--card)",
-                color: tab === t ? "#03260f" : "var(--fg)",
+                background: tab === tabId ? "var(--green)" : "var(--card)",
+                color: tab === tabId ? "#03260f" : "var(--fg)",
                 border: "1px solid var(--line)",
               }}
             >
-              {t === "trace" ? "🎥 トレーサー" : "📐 クラブ・マトリクス"}
+              {tabId === "trace" ? t("🎥 トレーサー") : t("📐 クラブ・マトリクス")}
             </button>
           ))}
         </div>
@@ -70,6 +72,7 @@ export default function TracerPage() {
 }
 
 function Tracer({ onSaved }: { onSaved: () => void }) {
+  const t = useT();
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -127,14 +130,14 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   }, [club]);
 
   useEffect(() => () => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current?.getTracks().forEach((tr) => tr.stop());
     audioCtxRef.current?.close().catch(() => {});
     cancelAnimationFrame(rafRef.current);
   }, []);
 
   async function startCam() {
     if (!navigator.mediaDevices?.getUserMedia) {
-      alert("このブラウザ/接続ではカメラを利用できません（HTTPS環境が必要です）。");
+      alert(t("このブラウザ/接続ではカメラを利用できません（HTTPS環境が必要です）。"));
       return;
     }
     let s: MediaStream | null = null;
@@ -149,7 +152,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     for (const c of tries) {
       try { s = await navigator.mediaDevices.getUserMedia(c); break; } catch { /* next */ }
     }
-    if (!s) { alert("カメラを起動できませんでした。"); return; }
+    if (!s) { alert(t("カメラを起動できませんでした。")); return; }
     streamRef.current = s;
     if (videoRef.current) {
       videoRef.current.srcObject = s;
@@ -197,7 +200,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   }
 
   function stopCam() {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current?.getTracks().forEach((tr) => tr.stop());
     streamRef.current = null;
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
@@ -395,9 +398,9 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
               <div>
                 <div className="text-4xl mb-2">🎥</div>
                 <p className="text-sm" style={{ color: "var(--muted)" }}>
-                  飛球線の後方から、ボールと打ち出し方向が<br />
-                  両方映るようにカメラを固定してください。<br />
-                  打つと弾道を物理検証し、約1.5秒後に描画します（屋外OK）。
+                  {t("飛球線の後方から、ボールと打ち出し方向が")}<br />
+                  {t("両方映るようにカメラを固定してください。")}<br />
+                  {t("打つと弾道を物理検証し、約1.5秒後に描画します（屋外OK）。")}
                 </p>
               </div>
             </div>
@@ -405,24 +408,24 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
           {camOn && (
             <div className="absolute top-2 left-2 px-3 py-1 rounded-full text-xs font-bold"
               style={{ background: "rgba(0,0,0,0.6)", color: phase === "capturing" ? "#fbbf24" : "#fff" }}>
-              {phase === "capturing" ? "● 弾道を物理検証中…" : "○ 監視中 — 打ってください"}
+              {phase === "capturing" ? t("● 弾道を物理検証中…") : t("○ 監視中 — 打ってください")}
             </div>
           )}
           {camOn && (
             <div className="absolute bottom-2 left-2 px-2.5 py-1 rounded-full text-[10px] font-bold"
               style={{ background: "rgba(0,0,0,0.55)", color: micOn ? "#4ade80" : "#9ca3af" }}>
-              {micOn ? "🎙 打音同期 ON" : "🎙 打音OFF（映像検知）"}
+              {micOn ? t("🎙 打音同期 ON") : t("🎙 打音OFF（映像検知）")}
             </div>
           )}
           {camOn && (
             <button onClick={stopCam} className="absolute top-2 right-2 btn btn-ghost text-xs px-3 py-1.5">
-              停止
+              {t("停止")}
             </button>
           )}
           {result && (
             <div className="absolute bottom-2 left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-full text-sm font-bold flex items-center gap-2"
               style={{ background: shapeColor(result.shape), color: "#04121f" }}>
-              {shapeLabel(result.shape)} ・ Peak {result.apex}m
+              {t(shapeLabel(result.shape))} ・ Peak {result.apex}m
             </div>
           )}
         </div>
@@ -431,15 +434,15 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       <Card className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
           <label className="block">
-            <span className="text-xs" style={{ color: "var(--muted)" }}>クラブ</span>
+            <span className="text-xs" style={{ color: "var(--muted)" }}>{t("クラブ")}</span>
             <select value={club} onChange={(e) => setClub(e.target.value)} className="w-full px-3 py-2.5 mt-1">
               {CLUBS.map((c) => (
-                <option key={c.id} value={c.id}>{c.label}</option>
+                <option key={c.id} value={c.id}>{t(c.label)}</option>
               ))}
             </select>
           </label>
           <label className="block">
-            <span className="text-xs" style={{ color: "var(--muted)" }}>ヘッドスピード (m/s)</span>
+            <span className="text-xs" style={{ color: "var(--muted)" }}>{t("ヘッドスピード (m/s)")}</span>
             <input
               type="number"
               inputMode="decimal"
@@ -451,37 +454,35 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
           </label>
         </div>
         <p className="text-[11px]" style={{ color: "var(--muted)" }}>
-          スイング解析で計測したヘッドスピードを自動反映。空欄ならクラブ標準値（{live.headSpeed}m/s）で推定します。
+          {t("スイング解析で計測したヘッドスピードを自動反映。空欄ならクラブ標準値（{hs}m/s）で推定します。", { hs: live.headSpeed })}
         </p>
       </Card>
 
       {!camOn ? (
         <button onClick={startCam} className="btn btn-primary w-full py-3.5">
-          📷 カメラを起動して計測
+          {t("📷 カメラを起動して計測")}
         </button>
       ) : null}
 
       {result && (
         <>
           <div className="grid grid-cols-4 gap-2">
-            <Stat label="球筋" value={shapeLabel(result.shape)} accent={shapeColor(result.shape)} />
-            <Stat label="最高到達点" value={result.apex} unit="m" accent="var(--cyan)" />
-            <Stat label="推定キャリー" value={result.carry} unit="m" accent="var(--green)" />
-            <Stat label="ミート率" value={result.smash.toFixed(2)} accent="#fbbf24" />
+            <Stat label={t("球筋")} value={t(shapeLabel(result.shape))} accent={shapeColor(result.shape)} />
+            <Stat label={t("最高到達点")} value={result.apex} unit="m" accent="var(--cyan)" />
+            <Stat label={t("推定キャリー")} value={result.carry} unit="m" accent="var(--green)" />
+            <Stat label={t("ミート率")} value={result.smash.toFixed(2)} accent="#fbbf24" />
           </div>
           <Replay3D shape={result.shape} apex={result.apex} carry={result.carry} />
           <Card>
             <div className="text-xs" style={{ color: "var(--muted)" }}>
-              推定初速 {result.ballSpeed} m/s ・ ヘッドスピード {live.headSpeed} m/s（{clubLabel(club)}）
+              {t("推定初速 {ballSpeed} m/s ・ ヘッドスピード {hs} m/s（{club}）", { ballSpeed: result.ballSpeed, hs: live.headSpeed, club: t(clubLabel(club)) })}
             </div>
           </Card>
         </>
       )}
 
       <p className="text-[11px] leading-relaxed px-1" style={{ color: "var(--muted)" }}>
-        ※ 飛行中は線を描かず、打球の候補を一旦すべて記録 → 物理法則（放物線・重力）に合致する軌道だけを逆算抽出し、約1.5秒後にトレーサーを描画します。
-        これにより風で揺れるネット・木々・人・影などのノイズを誤検知しません。打音（マイク）が使える場合はインパクトを基準に時間枠を絞り精度が上がります。
-        飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（β）。
+        {t("※ 飛行中は線を描かず、打球の候補を一旦すべて記録 → 物理法則（放物線・重力）に合致する軌道だけを逆算抽出し、約1.5秒後にトレーサーを描画します。これにより風で揺れるネット・木々・人・影などのノイズを誤検知しません。打音（マイク）が使える場合はインパクトを基準に時間枠を絞り精度が上がります。飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（β）。")}
       </p>
     </div>
   );
@@ -558,6 +559,7 @@ function cameraAt(t: number, mid: V3, landing: V3, carry: number) {
 }
 
 function Replay3D({ shape, apex, carry }: { shape: BallShape; apex: number; carry: number }) {
+  const tr = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
   const tRef = useRef(0);
@@ -709,7 +711,7 @@ function Replay3D({ shape, apex, carry }: { shape: BallShape; apex: number; carr
         ctx.fillStyle = "#22d3ee";
         ctx.font = "bold 12px system-ui";
         ctx.textAlign = "center";
-        ctx.fillText(`最高到達点 ${apex}m`, ap.x, ap.y - 8);
+        ctx.fillText(tr("最高到達点 {apex}m", { apex }), ap.x, ap.y - 8);
       }
       const lp = proj({ ...landing, y: 0 }, cam);
       if (lp && t > 0.55) {
@@ -723,28 +725,28 @@ function Replay3D({ shape, apex, carry }: { shape: BallShape; apex: number; carr
     };
     rafRef.current = requestAnimationFrame(render);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [shape, apex, carry, nonce]);
+  }, [shape, apex, carry, nonce, tr]);
 
   return (
     <Card className="p-3">
       <div className="flex items-center justify-between mb-2">
-        <div className="text-xs font-bold">🎬 3Dズーム・リプレイ</div>
+        <div className="text-xs font-bold">{tr("🎬 3Dズーム・リプレイ")}</div>
         <button onClick={() => setNonce((n) => n + 1)} className="btn btn-ghost text-xs px-3 py-1">
-          🔄 もう一度
+          {tr("🔄 もう一度")}
         </button>
       </div>
       <div className="rounded-xl overflow-hidden" style={{ border: "1px solid var(--line)" }}>
         <canvas ref={canvasRef} width={340} height={300} className="w-full block" />
       </div>
       <p className="text-[10px] mt-2" style={{ color: "var(--muted)" }}>
-        仮想カメラが打席後方→上空→ピン側へ回り込み、推定した3D弾道（放物線・着弾・転がり）を再現します。
-        弾道は計測した球筋とクラブ推定値からの再構成です（β）。
+        {tr("仮想カメラが打席後方→上空→ピン側へ回り込み、推定した3D弾道（放物線・着弾・転がり）を再現します。弾道は計測した球筋とクラブ推定値からの再構成です（β）。")}
       </p>
     </Card>
   );
 }
 
 function Matrix({ shots }: { shots: BallShot[] }) {
+  const t = useT();
   const byClub = CLUBS.map((c) => {
     const list = shots.filter((s) => s.club === c.id);
     return { club: c, list };
@@ -753,14 +755,14 @@ function Matrix({ shots }: { shots: BallShot[] }) {
   if (shots.length === 0) {
     return (
       <Card className="text-center py-10 text-sm" style={{ color: "var(--muted)" }}>
-        まだ弾道データがありません。<br />「トレーサー」で計測すると分布図が作られます。
+        {t("まだ弾道データがありません。")}<br />{t("「トレーサー」で計測すると分布図が作られます。")}
       </Card>
     );
   }
 
   const palette = ["#ef4444", "#f59e0b", "#22c55e", "#22d3ee", "#3b82f6", "#a78bfa", "#ec4899", "#84cc16"];
   const data = byClub.map((g, i) => ({
-    name: g.club.label,
+    name: t(g.club.label),
     color: palette[i % palette.length],
     points: g.list.map((s) => ({ x: s.carry_m ?? 0, y: s.apex_m ?? 0, hs: s.head_speed ?? 0 })),
     avgCarry: Math.round(g.list.reduce((a, s) => a + (s.carry_m ?? 0), 0) / g.list.length),
@@ -772,7 +774,7 @@ function Matrix({ shots }: { shots: BallShot[] }) {
   const sorted = [...data].sort((a, b) => b.avgCarry - a.avgCarry);
   for (let i = 1; i < sorted.length; i++) {
     if (Math.abs(sorted[i].avgCarry - sorted[i - 1].avgCarry) <= 6) {
-      insight = `${sorted[i - 1].name}と${sorted[i].name}のキャリーが近接（${sorted[i - 1].avgCarry}m / ${sorted[i].avgCarry}m）。番手が機能していない可能性があります。`;
+      insight = t("{a}と{b}のキャリーが近接（{ca}m / {cb}m）。番手が機能していない可能性があります。", { a: sorted[i - 1].name, b: sorted[i].name, ca: sorted[i - 1].avgCarry, cb: sorted[i].avgCarry });
       break;
     }
   }
@@ -781,14 +783,14 @@ function Matrix({ shots }: { shots: BallShot[] }) {
     <div className="space-y-4">
       <Card>
         <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-          クラブ・マトリクス（キャリー × 最高到達点）
+          {t("クラブ・マトリクス（キャリー × 最高到達点）")}
         </div>
         <ResponsiveContainer width="100%" height={300}>
           <ScatterChart margin={{ top: 10, right: 12, bottom: 16, left: -8 }}>
             <XAxis
               type="number"
               dataKey="x"
-              name="キャリー"
+              name={t("キャリー")}
               unit="m"
               tick={{ fill: "#93a4bf", fontSize: 10 }}
               axisLine={{ stroke: "#243651" }}
@@ -797,7 +799,7 @@ function Matrix({ shots }: { shots: BallShot[] }) {
             <YAxis
               type="number"
               dataKey="y"
-              name="高さ"
+              name={t("高さ")}
               unit="m"
               tick={{ fill: "#93a4bf", fontSize: 10 }}
               axisLine={{ stroke: "#243651" }}
@@ -819,13 +821,13 @@ function Matrix({ shots }: { shots: BallShot[] }) {
       {insight && (
         <Card>
           <div className="text-sm">
-            <span style={{ color: "var(--amber)" }}>📐 フィッティング示唆：</span> {insight}
+            <span style={{ color: "var(--amber)" }}>{t("📐 フィッティング示唆：")}</span> {insight}
           </div>
         </Card>
       )}
 
       <Card>
-        <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>クラブ別 平均</div>
+        <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>{t("クラブ別 平均")}</div>
         <div className="space-y-1.5 text-sm">
           {data.map((d) => (
             <div key={d.name} className="flex items-center justify-between">
@@ -834,7 +836,7 @@ function Matrix({ shots }: { shots: BallShot[] }) {
                 {d.name}
               </span>
               <span style={{ color: "var(--muted)" }}>
-                {d.avgCarry}m ・ 高さ{d.avgApex}m ・ {d.points.length}球
+                {t("{carry}m ・ 高さ{apex}m ・ {n}球", { carry: d.avgCarry, apex: d.avgApex, n: d.points.length })}
               </span>
             </div>
           ))}

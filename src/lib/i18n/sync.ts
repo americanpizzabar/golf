@@ -1,0 +1,68 @@
+export const d: Record<string, string> = {
+  "正面": "Front",
+  "後方(DTL)": "Down the line (DTL)",
+  "カメラ/マイクを利用できませんでした。ブラウザの権限を許可してください。":
+    "Could not access the camera/microphone. Please grant browser permissions.",
+  "この端末では録画(MediaRecorder)に対応していません。":
+    "Recording (MediaRecorder) is not supported on this device.",
+  "親機へ送信中…": "Sending to host…",
+  "送信完了 ✓": "Sent ✓",
+  "両動画そろいました": "Both videos are ready",
+  "子機の録画/送信を待っています…": "Waiting for the guest to record/send…",
+  "録画中（親機・子機 同時）": "Recording (host and guest simultaneously)",
+  "正面動画を解析中…": "Analyzing front video…",
+  "後方動画を解析中…": "Analyzing down-the-line video…",
+  "骨格を十分に検出できませんでした。全身が大きく・明るく映るよう撮り直してください。":
+    "Could not detect enough of your pose. Please re-record so your whole body is large and well lit.",
+  "解析中にエラーが発生しました。": "An error occurred during analysis.",
+  "接続しました。録画ボタンで2台同時に撮影します。":
+    "Connected. Use the record button to film with both devices at once.",
+  "接続しました。親機の操作を待っています…": "Connected. Waiting for the host…",
+  "動画の転送に失敗しました。通信環境を確認してもう一度お試しください。":
+    "Video transfer failed. Please check your connection and try again.",
+  "録画中…": "Recording…",
+  "子機の動画を受信しました": "Received the guest's video",
+  "子機の参加を待っています…": "Waiting for the guest to join…",
+  "6桁のコードを入力してください。": "Please enter a 6-digit code.",
+  "親機に接続しています…": "Connecting to host…",
+  "もう一度、録画ボタンで撮影できます。": "You can record again with the record button.",
+  "親機の操作を待っています…": "Waiting for the host…",
+  "シンクロ撮影": "Sync Recording",
+  "2台のスマホを6桁コードで繋ぎ、正面×後方を同時録画":
+    "Connect two phones with a 6-digit code and record front and down-the-line at once",
+  "2台で同時に撮影する": "Record with two devices at once",
+  "片方を「親機」にして6桁コードを発行し、もう片方の「子機」で入力します。親機の録画ボタンで両方が同時に録画され、子機の映像が自動で集約・解析されます。映像は原則端末間で直接送られます。":
+    "Make one phone the host to issue a 6-digit code, and enter it on the other (guest). The host's record button records both at once, and the guest's video is automatically gathered and analyzed. Videos are sent directly between devices whenever possible.",
+  "親機にする（コードを発行）": "Make this the host (issue code)",
+  "子機として参加": "Join as guest",
+  "6桁コード": "6-digit code",
+  "参加する": "Join",
+  "三脚やもう1台のスマホを正面・後方に設置し、インパクトの打音がどちらにも入るようにすると同期精度が上がります。映像は":
+    "Place a tripod or a second phone in front and down the line so the impact sound reaches both for better sync accuracy. Videos are ",
+  "原則として端末間で直接": "sent directly between devices by default",
+  "送られますが、直接つながらない回線では一時的にクラウドを経由（転送後すぐ削除）するので、別々のネットワークでも使えます。":
+    ", but on connections that can't link directly they temporarily go through the cloud (deleted right after transfer), so it works across separate networks too.",
+  "親機": "Host",
+  "子機": "Guest",
+  "接続済み": "Connected",
+  "未接続": "Disconnected",
+  "接続待ち…": "Waiting for connection…",
+  "接続コード": "Connection code",
+  "転送経路:": "Transfer route:",
+  "端末間 直接 P2P（高速・非経由）": "Direct device-to-device P2P (fast, no relay)",
+  "クラウド リレー（自動切替）": "Cloud relay (auto fallback)",
+  "確立中…": "Establishing…",
+  "あなた＝": "You = ",
+  "あなた（親機）のアングル": "Your angle (host)",
+  "● 2台同時に録画開始": "● Start recording on both devices",
+  "■ 停止して解析": "■ Stop and analyze",
+  "子機から受信中… {pct}%": "Receiving from guest… {pct}%",
+  "あなたの担当：": "Your role: ",
+  "録画は親機の操作で自動的に始まります。スマホを固定し、全身が画面に大きく入るよう構えてください。":
+    "Recording starts automatically when the host acts. Keep your phone steady and frame your whole body large on screen.",
+  "親機へ送信中… {pct}%": "Sending to host… {pct}%",
+  "セッションを終了": "End session",
+  "解析中…": "Analyzing…",
+  "もう一度撮影": "Record again",
+  "終了": "Finish",
+};

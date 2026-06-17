@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useT } from "@/lib/i18n";
 
 const items = [
   { href: "/", label: "ホーム", icon: "🏠" },
@@ -13,6 +14,7 @@ const items = [
 
 export default function BottomNav() {
   const path = usePathname();
+  const t = useT();
   return (
     <nav className="tabbar">
       <div className="flex justify-around items-stretch px-1 py-1.5">
@@ -26,7 +28,7 @@ export default function BottomNav() {
               style={{ color: active ? "var(--green)" : "var(--muted)" }}
             >
               <span className="text-xl leading-none">{it.icon}</span>
-              <span className="text-[10px] font-semibold">{it.label}</span>
+              <span className="text-[10px] font-semibold">{t(it.label)}</span>
             </Link>
           );
         })}

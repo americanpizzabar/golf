@@ -4,13 +4,15 @@ import { useEffect, useState } from "react";
 import { PageHeader, Card } from "@/components/ui";
 import { saveRound, fetchRounds } from "@/lib/db";
 import type { Round, RoundPlayer } from "@/lib/types";
+import { useT } from "@/lib/i18n";
 
 export default function MatchPage() {
+  const t = useT();
   const [started, setStarted] = useState(false);
   const [course, setCourse] = useState("");
   const [holes, setHoles] = useState(9);
   const [players, setPlayers] = useState<RoundPlayer[]>([
-    { name: "あなた", scores: [], approachIn: 0, approachAtt: 0 },
+    { name: t("あなた"), scores: [], approachIn: 0, approachAtt: 0 },
   ]);
   const [hole, setHole] = useState(1);
   const [history, setHistory] = useState<Round[]>([]);
@@ -22,7 +24,7 @@ export default function MatchPage() {
 
   function addPlayer() {
     if (players.length >= 4) return;
-    setPlayers([...players, { name: `同伴者${players.length}`, scores: [], approachIn: 0, approachAtt: 0 }]);
+    setPlayers([...players, { name: t("同伴者{n}", { n: players.length }), scores: [], approachIn: 0, approachAtt: 0 }]);
   }
   function setName(i: number, name: string) {
     setPlayers((p) => p.map((pl, j) => (j === i ? { ...pl, name } : pl)));
@@ -63,26 +65,26 @@ export default function MatchPage() {
   if (!started) {
     return (
       <main>
-        <PageHeader title="一期一会ラウンド" subtitle="同伴者とスコア・寄せ率を競う" back />
+        <PageHeader title={t("一期一会ラウンド")} subtitle={t("同伴者とスコア・寄せ率を競う")} back />
         <div className="px-4 space-y-4">
           <Card className="space-y-3">
             <label className="block">
-              <span className="text-xs" style={{ color: "var(--muted)" }}>コース名（任意）</span>
-              <input value={course} onChange={(e) => setCourse(e.target.value)} placeholder="○○カントリークラブ" className="w-full px-3 py-2.5 mt-1" />
+              <span className="text-xs" style={{ color: "var(--muted)" }}>{t("コース名（任意）")}</span>
+              <input value={course} onChange={(e) => setCourse(e.target.value)} placeholder={t("○○カントリークラブ")} className="w-full px-3 py-2.5 mt-1" />
             </label>
             <div>
-              <span className="text-xs" style={{ color: "var(--muted)" }}>ホール数</span>
+              <span className="text-xs" style={{ color: "var(--muted)" }}>{t("ホール数")}</span>
               <div className="grid grid-cols-2 gap-2 mt-1">
                 {[9, 18].map((h) => (
                   <button key={h} onClick={() => setHoles(h)} className="btn py-2.5 text-sm"
                     style={{ background: holes === h ? "var(--green)" : "var(--bg-soft)", color: holes === h ? "#03260f" : "var(--fg)", border: "1px solid var(--line)" }}>
-                    {h}ホール
+                    {t("{h}ホール", { h })}
                   </button>
                 ))}
               </div>
             </div>
             <div>
-              <span className="text-xs" style={{ color: "var(--muted)" }}>プレーヤー（最大4人）</span>
+              <span className="text-xs" style={{ color: "var(--muted)" }}>{t("プレーヤー（最大4人）")}</span>
               <div className="space-y-2 mt-1">
                 {players.map((pl, i) => (
                   <div key={i} className="flex gap-2">
@@ -93,26 +95,26 @@ export default function MatchPage() {
                   </div>
                 ))}
                 {players.length < 4 && (
-                  <button onClick={addPlayer} className="btn btn-ghost w-full py-2 text-sm">＋ 同伴者を追加</button>
+                  <button onClick={addPlayer} className="btn btn-ghost w-full py-2 text-sm">{t("＋ 同伴者を追加")}</button>
                 )}
               </div>
             </div>
           </Card>
           <button onClick={() => { setStarted(true); setHole(1); }} className="btn btn-primary w-full py-3.5">
-            ⛳ ラウンド開始
+            {t("⛳ ラウンド開始")}
           </button>
 
-          {savedMsg && <p className="text-center text-sm" style={{ color: "var(--green)" }}>ラウンドを保存しました ✓</p>}
+          {savedMsg && <p className="text-center text-sm" style={{ color: "var(--green)" }}>{t("ラウンドを保存しました ✓")}</p>}
 
           {history.length > 0 && (
             <Card>
-              <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>過去のラウンド</div>
+              <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>{t("過去のラウンド")}</div>
               <div className="space-y-1.5 text-sm">
                 {history.map((r) => {
                   const win = [...r.players].sort((a, b) => a.scores.reduce((s, x) => s + (x || 0), 0) - b.scores.reduce((s, x) => s + (x || 0), 0))[0];
                   return (
                     <div key={r.id} className="flex justify-between">
-                      <span>{r.course_name || "ラウンド"} · {r.holes}H</span>
+                      <span>{r.course_name || t("ラウンド")} · {r.holes}H</span>
                       <span style={{ color: "var(--muted)" }}>🏆 {win?.name}</span>
                     </div>
                   );
@@ -127,7 +129,7 @@ export default function MatchPage() {
 
   return (
     <main>
-      <PageHeader title={course || "ラウンド中"} subtitle={`${holes}ホール`} back />
+      <PageHeader title={course || t("ラウンド中")} subtitle={t("{holes}ホール", { holes })} back />
       <div className="px-4 space-y-4">
         {/* Hole selector */}
         <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1">
@@ -140,7 +142,7 @@ export default function MatchPage() {
         </div>
 
         <Card>
-          <div className="text-sm font-bold mb-3">🕳 {hole}番ホール スコア入力</div>
+          <div className="text-sm font-bold mb-3">{t("🕳 {hole}番ホール スコア入力", { hole })}</div>
           <div className="space-y-3">
             {players.map((pl, i) => (
               <div key={i} className="flex items-center gap-3">
@@ -155,16 +157,16 @@ export default function MatchPage() {
 
         {/* Approach mini-game */}
         <Card>
-          <div className="text-sm font-bold mb-3">🎯 寄せ成功率（ラウンド通算）</div>
+          <div className="text-sm font-bold mb-3">{t("🎯 寄せ成功率（ラウンド通算）")}</div>
           <div className="space-y-2">
             {players.map((pl, i) => {
               const rate = pl.approachAtt ? Math.round((pl.approachIn / pl.approachAtt) * 100) : 0;
               return (
                 <div key={i} className="flex items-center gap-2 text-sm">
                   <div className="flex-1 min-w-0 truncate">{pl.name}</div>
-                  <button onClick={() => bumpApproach(i, "approachAtt", 1)} className="btn btn-ghost px-2 py-1 text-xs">打数+</button>
-                  <button onClick={() => bumpApproach(i, "approachIn", 1)} className="btn btn-primary px-2 py-1 text-xs">寄った+</button>
-                  <div className="w-20 text-right" style={{ color: "var(--cyan)" }}>{pl.approachIn}/{pl.approachAtt}（{rate}%）</div>
+                  <button onClick={() => bumpApproach(i, "approachAtt", 1)} className="btn btn-ghost px-2 py-1 text-xs">{t("打数+")}</button>
+                  <button onClick={() => bumpApproach(i, "approachIn", 1)} className="btn btn-primary px-2 py-1 text-xs">{t("寄った+")}</button>
+                  <div className="w-20 text-right" style={{ color: "var(--cyan)" }}>{t("{i}/{a}（{rate}%）", { i: pl.approachIn, a: pl.approachAtt, rate })}</div>
                 </div>
               );
             })}
@@ -173,7 +175,7 @@ export default function MatchPage() {
 
         {/* Leaderboard */}
         <Card>
-          <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>リーダーボード</div>
+          <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>{t("リーダーボード")}</div>
           <div className="space-y-2">
             {ranking.map((pl, i) => (
               <div key={pl.name} className="flex items-center gap-3">
@@ -190,7 +192,7 @@ export default function MatchPage() {
           </div>
         </Card>
 
-        <button onClick={finish} className="btn btn-primary w-full py-3.5">ラウンドを終了して保存</button>
+        <button onClick={finish} className="btn btn-primary w-full py-3.5">{t("ラウンドを終了して保存")}</button>
       </div>
     </main>
   );

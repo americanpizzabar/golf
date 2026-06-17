@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { PageHeader, Card, Stat, Spinner } from "@/components/ui";
+import { useT } from "@/lib/i18n";
 
 interface Cond {
   temp: number; // ℃
@@ -19,6 +20,7 @@ function airDensity(tempC: number, pressureHpa: number) {
 }
 
 export default function ConditionsPage() {
+  const t = useT();
   const [cond, setCond] = useState<Cond | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -32,7 +34,7 @@ export default function ConditionsPage() {
   async function detect() {
     setErr("");
     if (!navigator.geolocation) {
-      setErr("位置情報が利用できません。手動入力をご利用ください。");
+      setErr(t("位置情報が利用できません。手動入力をご利用ください。"));
       setManual(true);
       return;
     }
@@ -54,13 +56,13 @@ export default function ConditionsPage() {
           });
           setLoading(false);
         } catch {
-          setErr("気象データを取得できませんでした。手動入力をご利用ください。");
+          setErr(t("気象データを取得できませんでした。手動入力をご利用ください。"));
           setManual(true);
           setLoading(false);
         }
       },
       () => {
-        setErr("位置情報の取得が許可されませんでした。手動入力をご利用ください。");
+        setErr(t("位置情報の取得が許可されませんでした。手動入力をご利用ください。"));
         setManual(true);
         setLoading(false);
       },
@@ -113,62 +115,62 @@ export default function ConditionsPage() {
 
   return (
     <main>
-      <PageHeader title="弾道エミュレーター" subtitle="標高・気温・風で飛距離変化を予測" back />
+      <PageHeader title={t("弾道エミュレーター")} subtitle={t("標高・気温・風で飛距離変化を予測")} back />
       <div className="px-4 space-y-4">
         <Card>
           <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-            現在地の環境を取得して、いまの弾道がコースでどう変わるかを予測します。
+            {t("現在地の環境を取得して、いまの弾道がコースでどう変わるかを予測します。")}
           </div>
           {!manual ? (
             <div className="grid grid-cols-2 gap-2">
               <button onClick={detect} disabled={loading} className="btn btn-primary py-3 disabled:opacity-50">
-                {loading ? "取得中…" : "📍 現在地で計測"}
+                {loading ? t("取得中…") : `📍 ${t("現在地で計測")}`}
               </button>
               <button onClick={() => setManual(true)} className="btn btn-ghost py-3">
-                ✏️ 手動入力
+                ✏️ {t("手動入力")}
               </button>
             </div>
           ) : (
             <div className="space-y-3">
               <div className="grid grid-cols-3 gap-2">
                 <label className="block">
-                  <span className="text-xs" style={{ color: "var(--muted)" }}>気温℃</span>
+                  <span className="text-xs" style={{ color: "var(--muted)" }}>{t("気温℃")}</span>
                   <input type="number" value={mTemp} onChange={(e) => setMTemp(e.target.value)} className="w-full px-2 py-2 mt-1" />
                 </label>
                 <label className="block">
-                  <span className="text-xs" style={{ color: "var(--muted)" }}>標高m</span>
+                  <span className="text-xs" style={{ color: "var(--muted)" }}>{t("標高m")}</span>
                   <input type="number" value={mElev} onChange={(e) => setMElev(e.target.value)} className="w-full px-2 py-2 mt-1" />
                 </label>
                 <label className="block">
-                  <span className="text-xs" style={{ color: "var(--muted)" }}>風m/s</span>
+                  <span className="text-xs" style={{ color: "var(--muted)" }}>{t("風m/s")}</span>
                   <input type="number" value={mWind} onChange={(e) => setMWind(e.target.value)} className="w-full px-2 py-2 mt-1" />
                 </label>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                <button onClick={applyManual} className="btn btn-primary py-2.5">反映する</button>
-                <button onClick={() => setManual(false)} className="btn btn-ghost py-2.5">位置情報に戻す</button>
+                <button onClick={applyManual} className="btn btn-primary py-2.5">{t("反映する")}</button>
+                <button onClick={() => setManual(false)} className="btn btn-ghost py-2.5">{t("位置情報に戻す")}</button>
               </div>
             </div>
           )}
-          {loading && <div className="mt-3"><Spinner label="気象データを取得中…" /></div>}
+          {loading && <div className="mt-3"><Spinner label={t("気象データを取得中…")} /></div>}
           {err && <p className="text-xs mt-2" style={{ color: "var(--amber)" }}>{err}</p>}
         </Card>
 
         {cond && (
           <>
             <div className="grid grid-cols-3 gap-2">
-              <Stat label="気温" value={cond.temp.toFixed(0)} unit="℃" accent="#f59e0b" />
-              <Stat label="標高" value={cond.elevation.toFixed(0)} unit="m" accent="#22d3ee" />
-              <Stat label="気圧" value={cond.pressure.toFixed(0)} unit="hPa" accent="var(--muted)" />
+              <Stat label={t("気温")} value={cond.temp.toFixed(0)} unit="℃" accent="#f59e0b" />
+              <Stat label={t("標高")} value={cond.elevation.toFixed(0)} unit="m" accent="#22d3ee" />
+              <Stat label={t("気圧")} value={cond.pressure.toFixed(0)} unit="hPa" accent="var(--muted)" />
             </div>
 
             <Card>
               <label className="block mb-3">
-                <span className="text-xs" style={{ color: "var(--muted)" }}>基準キャリー（平地・無風での飛距離 m）</span>
+                <span className="text-xs" style={{ color: "var(--muted)" }}>{t("基準キャリー（平地・無風での飛距離 m）")}</span>
                 <input type="number" inputMode="numeric" value={baseCarry} onChange={(e) => setBaseCarry(e.target.value)} className="w-full px-3 py-2.5 mt-1" />
               </label>
               <div className="text-xs mb-1.5" style={{ color: "var(--muted)" }}>
-                風（{cond.windSpeed.toFixed(1)} m/s・{windName(cond.windDir)}の風）に対する向き
+                {t("風（{speed} m/s・{dir}の風）に対する向き", { speed: cond.windSpeed.toFixed(1), dir: t(windName(cond.windDir)) })}
               </div>
               <div className="grid grid-cols-4 gap-1.5">
                 {([["none", "無風換算"], ["head", "向かい"], ["tail", "追い"], ["cross", "横"]] as const).map(([k, label]) => (
@@ -182,7 +184,7 @@ export default function ConditionsPage() {
                       border: "1px solid var(--line)",
                     }}
                   >
-                    {label}
+                    {t(label)}
                   </button>
                 ))}
               </div>
@@ -191,7 +193,7 @@ export default function ConditionsPage() {
             {calc && (
               <Card className="relative overflow-hidden">
                 <div className="absolute -right-8 -top-8 w-32 h-32 rounded-full opacity-20" style={{ background: "#22c55e" }} />
-                <div className="text-xs" style={{ color: "var(--muted)" }}>予測キャリー</div>
+                <div className="text-xs" style={{ color: "var(--muted)" }}>{t("予測キャリー")}</div>
                 <div className="text-4xl font-extrabold mt-1" style={{ color: "var(--green)" }}>
                   {calc.finalCarry.toFixed(0)}
                   <span className="text-xl"> m</span>
@@ -200,22 +202,22 @@ export default function ConditionsPage() {
                   </span>
                 </div>
                 <div className="mt-3 space-y-1.5 text-sm">
-                  <Row label="気温・標高（空気密度）" v={calc.airDelta} />
-                  {wind !== "none" && wind !== "cross" && <Row label={wind === "head" ? "向かい風" : "追い風"} v={calc.windDelta} />}
+                  <Row label={t("気温・標高（空気密度）")} v={calc.airDelta} />
+                  {wind !== "none" && wind !== "cross" && <Row label={wind === "head" ? t("向かい風") : t("追い風")} v={calc.windDelta} />}
                   {wind === "cross" && (
                     <div className="text-xs" style={{ color: "var(--muted)" }}>
-                      横風はキャリーよりも左右のブレに影響します。狙いをズラして対応を。
+                      {t("横風はキャリーよりも左右のブレに影響します。狙いをズラして対応を。")}
                     </div>
                   )}
                 </div>
                 <p className="text-[11px] mt-3" style={{ color: "var(--muted)" }}>
-                  空気密度 {calc.rho.toFixed(3)} kg/m³（標準比 {(calc.densityFactor * 100).toFixed(0)}%）。
+                  {t("空気密度 {rho} kg/m³（標準比 {pct}%）。", { rho: calc.rho.toFixed(3), pct: (calc.densityFactor * 100).toFixed(0) })}
                   {calc.airDelta >= 0
-                    ? "空気が薄く飛びやすい環境です。グリーンで止まりにくい点に注意。"
-                    : "空気が重く飛びにくい環境です。"}
+                    ? t("空気が薄く飛びやすい環境です。グリーンで止まりにくい点に注意。")
+                    : t("空気が重く飛びにくい環境です。")}
                 </p>
                 <p className="text-[10px] mt-2" style={{ color: "var(--muted)" }}>
-                  ※ 物理モデルによる概算値です。実際の弾道は打ち出し角・スピン量により変動します。
+                  {t("※ 物理モデルによる概算値です。実際の弾道は打ち出し角・スピン量により変動します。")}
                 </p>
               </Card>
             )}

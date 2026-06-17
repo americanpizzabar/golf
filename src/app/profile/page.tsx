@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useT } from "@/lib/i18n";
 import { PageHeader, Card } from "@/components/ui";
 import { fetchPros, getProfile, upsertProfile } from "@/lib/db";
 import { matchPro } from "@/lib/swing";
@@ -8,6 +9,7 @@ import { getPoseLandmarker, drawSkeleton, LM, type Frame } from "@/lib/pose";
 import type { Pro, Profile } from "@/lib/types";
 
 export default function ProfilePage() {
+  const t = useT();
   const [pros, setPros] = useState<Pro[]>([]);
   const [form, setForm] = useState({
     nickname: "",
@@ -89,21 +91,21 @@ export default function ProfilePage() {
 
   return (
     <main>
-      <PageHeader title="体型・骨格プロフィール" subtitle="あなたに近いプロを自動選定" back />
+      <PageHeader title={t("体型・骨格プロフィール")} subtitle={t("あなたに近いプロを自動選定")} back />
       <div className="px-4 space-y-4">
         <Card className="space-y-3">
           <label className="block">
             <span className="text-xs" style={{ color: "var(--muted)" }}>
-              ニックネーム
+              {t("ニックネーム")}
             </span>
             <input
               value={form.nickname}
-              placeholder="ゴルファー名"
+              placeholder={t("ゴルファー名")}
               onChange={(e) => setForm({ ...form, nickname: e.target.value })}
               className="w-full px-3 py-2.5 mt-1"
             />
           </label>
-          {field("height_cm", "身長 (cm)", "172")}
+          {field("height_cm", t("身長 (cm)"), "172")}
 
           <div>
             <button
@@ -112,12 +114,12 @@ export default function ProfilePage() {
               className="btn btn-ghost w-full py-2.5 text-sm disabled:opacity-50"
               style={{ border: "1px solid var(--green)", color: "var(--green)" }}
             >
-              📷 カメラで体型を自動計測
+              {t("📷 カメラで体型を自動計測")}
             </button>
             <span className="text-[10px] block mt-1" style={{ color: "var(--muted)" }}>
               {form.height_cm
-                ? "全身が映るようスマホを立て、2〜3m離れて正面に立つと、腕・脚・肩幅・胴体の比率を自動計測します。"
-                : "先に身長を入力してください（計測の基準になります）。"}
+                ? t("全身が映るようスマホを立て、2〜3m離れて正面に立つと、腕・脚・肩幅・胴体の比率を自動計測します。")
+                : t("先に身長を入力してください（計測の基準になります）。")}
             </span>
             {scanMsg && (
               <span className="text-[11px] block mt-1" style={{ color: "var(--cyan)" }}>{scanMsg}</span>
@@ -125,21 +127,21 @@ export default function ProfilePage() {
           </div>
 
           <div className="grid grid-cols-2 gap-3">
-            {field("arm_length_cm", "腕の長さ (cm)", "76", "肩〜手首")}
-            {field("shoulder_width_cm", "肩幅 (cm)", "45")}
+            {field("arm_length_cm", t("腕の長さ (cm)"), "76", t("肩〜手首"))}
+            {field("shoulder_width_cm", t("肩幅 (cm)"), "45")}
           </div>
-          {field("leg_length_cm", "脚の長さ (cm)", "90", "股下")}
+          {field("leg_length_cm", t("脚の長さ (cm)"), "90", t("股下"))}
           <label className="block">
             <span className="text-xs" style={{ color: "var(--muted)" }}>
-              利き手
+              {t("利き手")}
             </span>
             <select
               value={form.dominant_hand}
               onChange={(e) => setForm({ ...form, dominant_hand: e.target.value })}
               className="w-full px-3 py-2.5 mt-1"
             >
-              <option value="right">右打ち</option>
-              <option value="left">左打ち</option>
+              <option value="right">{t("右打ち")}</option>
+              <option value="left">{t("左打ち")}</option>
             </select>
           </label>
         </Card>
@@ -147,7 +149,7 @@ export default function ProfilePage() {
         {match && (
           <Card>
             <div className="text-xs" style={{ color: "var(--muted)" }}>
-              骨格シンクロ・ランキング
+              {t("骨格シンクロ・ランキング")}
             </div>
             <div className="mt-2 space-y-2">
               {match.ranking.slice(0, 4).map((r, i) => (
@@ -181,7 +183,7 @@ export default function ProfilePage() {
           disabled={loading || !form.height_cm}
           className="btn btn-primary w-full py-3.5 disabled:opacity-50"
         >
-          {saved ? "保存しました ✓" : "保存して理想のプロを確定"}
+          {saved ? t("保存しました ✓") : t("保存して理想のプロを確定")}
         </button>
       </div>
 
@@ -196,7 +198,7 @@ export default function ProfilePage() {
               shoulder_width_cm: String(m.shoulder),
               leg_length_cm: String(m.leg),
             }));
-            setScanMsg(`計測完了：腕 ${m.arm} / 肩幅 ${m.shoulder} / 脚 ${m.leg} cm（下のランキングに反映）`);
+            setScanMsg(t("計測完了：腕 {arm} / 肩幅 {shoulder} / 脚 {leg} cm（下のランキングに反映）", { arm: m.arm, shoulder: m.shoulder, leg: m.leg }));
             setScanning(false);
           }}
         />
@@ -223,6 +225,7 @@ function BodyScan({
   onClose: () => void;
   onMeasured: (m: Measured) => void;
 }) {
+  const t = useT();
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -301,7 +304,7 @@ function BodyScan({
         setReady(true);
         rafRef.current = requestAnimationFrame(loop);
       } catch {
-        setErr("カメラまたは解析エンジンを起動できませんでした。");
+        setErr(t("カメラまたは解析エンジンを起動できませんでした。"));
       }
     })();
     return () => {
@@ -309,6 +312,7 @@ function BodyScan({
       cancelAnimationFrame(rafRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function startCollect() {
@@ -325,7 +329,7 @@ function BodyScan({
     setCollecting(false);
     const s = samplesRef.current;
     if (s.length < 5) {
-      setErr("全身がうまく映りませんでした。頭から足先まで入るよう離れて、もう一度お試しください。");
+      setErr(t("全身がうまく映りませんでした。頭から足先まで入るよう離れて、もう一度お試しください。"));
       return;
     }
     const med = (key: "arm" | "sh" | "leg") => {
@@ -347,8 +351,8 @@ function BodyScan({
   return (
     <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "rgba(0,0,0,0.92)" }}>
       <div className="flex items-center justify-between px-4 py-3">
-        <span className="text-sm font-bold text-white">体型を自動計測</span>
-        <button onClick={onClose} className="btn btn-ghost text-xs px-3 py-1.5 text-white">閉じる</button>
+        <span className="text-sm font-bold text-white">{t("体型を自動計測")}</span>
+        <button onClick={onClose} className="btn btn-ghost text-xs px-3 py-1.5 text-white">{t("閉じる")}</button>
       </div>
       <div className="relative flex-1 mx-3 rounded-2xl overflow-hidden" style={{ background: "#000" }}>
         <video ref={videoRef} playsInline muted className="absolute inset-0 w-full h-full object-contain" />
@@ -357,14 +361,14 @@ function BodyScan({
           className="absolute top-2 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full text-xs font-bold"
           style={{ background: "rgba(0,0,0,0.6)", color: bodyVisible ? "#4ade80" : "#fff" }}
         >
-          {!ready ? "起動中…" : bodyVisible ? "● 全身を検出 — 計測できます" : "○ 頭から足先まで映してください"}
+          {!ready ? t("起動中…") : bodyVisible ? t("● 全身を検出 — 計測できます") : t("○ 頭から足先まで映してください")}
         </div>
         {collecting && (
           <div className="absolute bottom-3 left-3 right-3">
             <div className="h-1.5 rounded-full" style={{ background: "rgba(255,255,255,0.25)" }}>
               <div className="h-full rounded-full" style={{ width: `${progress}%`, background: "#22c55e" }} />
             </div>
-            <div className="text-center text-xs text-white mt-1">静止して計測中… {progress}%</div>
+            <div className="text-center text-xs text-white mt-1">{t("静止して計測中… {progress}%", { progress })}</div>
           </div>
         )}
       </div>
@@ -377,7 +381,7 @@ function BodyScan({
           disabled={!ready || !bodyVisible || collecting}
           className="btn btn-primary w-full py-3.5 disabled:opacity-40"
         >
-          {collecting ? "計測中…" : "この姿勢で計測する（約3秒）"}
+          {collecting ? t("計測中…") : t("この姿勢で計測する（約3秒）")}
         </button>
       </div>
     </div>

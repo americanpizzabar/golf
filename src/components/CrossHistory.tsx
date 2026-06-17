@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Card } from "@/components/ui";
+import { useT } from "@/lib/i18n";
 import { fetchCrossSessions, deleteCrossSession } from "@/lib/db";
 import type { CrossSession } from "@/lib/types";
 
@@ -20,6 +21,7 @@ function fmtDate(iso: string): string {
 // History of saved two-camera analyses (sync + cross). Read-only list with an
 // expandable detail view and per-row delete. Shared by /sync and /cross.
 export function CrossHistory() {
+  const t = useT();
   const [rows, setRows] = useState<CrossSession[] | null>(null);
   const [open, setOpen] = useState<string | null>(null);
 
@@ -38,7 +40,7 @@ export function CrossHistory() {
 
   return (
     <Card>
-      <div className="text-sm font-semibold mb-2">2視点解析の履歴</div>
+      <div className="text-sm font-semibold mb-2">{t("2視点解析の履歴")}</div>
       <div className="space-y-2">
         {rows.map((s) => {
           const score = s.score ?? 0;
@@ -61,14 +63,14 @@ export function CrossHistory() {
                       className="text-[10px] px-1.5 py-0.5 rounded-full font-bold"
                       style={{ background: "var(--bg-soft)", color: "var(--muted)" }}
                     >
-                      {SOURCE_LABEL[s.source] ?? s.source}
+                      {SOURCE_LABEL[s.source] ? t(SOURCE_LABEL[s.source]) : s.source}
                     </span>
                     <span className="text-[11px]" style={{ color: "var(--muted)" }}>
                       {fmtDate(s.created_at)}
                     </span>
                   </div>
                   <div className="text-[13px] font-semibold truncate mt-0.5">
-                    {s.top_finding ?? "解析結果"}
+                    {s.top_finding ?? t("解析結果")}
                   </div>
                 </div>
                 <span
@@ -86,22 +88,27 @@ export function CrossHistory() {
                 >
                   <div className="pt-2 grid grid-cols-2 gap-2 text-[11px]" style={{ color: "var(--muted)" }}>
                     <div>
-                      正面 前傾Δ {fmtDelta(s.front_metrics.spineDelta)}° / 頭{" "}
-                      {fmtSigned(s.front_metrics.headDropCm)}cm / 横ブレ {s.front_metrics.swayCm}cm
+                      {t("正面 前傾Δ {spine}° / 頭 {head}cm / 横ブレ {sway}cm", {
+                        spine: fmtDelta(s.front_metrics.spineDelta),
+                        head: fmtSigned(s.front_metrics.headDropCm),
+                        sway: s.front_metrics.swayCm,
+                      })}
                     </div>
                     <div>
-                      後方 前傾Δ {fmtDelta(s.dtl_metrics.spineDelta)}° / 腰前後{" "}
-                      {s.dtl_metrics.hipMoveCm}cm
+                      {t("後方 前傾Δ {spine}° / 腰前後 {hip}cm", {
+                        spine: fmtDelta(s.dtl_metrics.spineDelta),
+                        hip: s.dtl_metrics.hipMoveCm,
+                      })}
                     </div>
                   </div>
                   {s.findings.map((f, i) => (
                     <div key={i} className="card p-2.5">
                       <div className="font-semibold text-[12px] mb-1">{f.title}</div>
                       <div style={{ color: "var(--muted)" }}>
-                        <div>正面：{f.front}</div>
-                        <div>後方：{f.dtl}</div>
+                        <div>{t("正面：")}{f.front}</div>
+                        <div>{t("後方：")}{f.dtl}</div>
                         <div className="mt-1" style={{ color: "var(--text)" }}>
-                          真因：{f.truth}
+                          {t("真因：")}{f.truth}
                         </div>
                         <div className="mt-1" style={{ color: "var(--green)" }}>
                           → {f.advice}
@@ -114,7 +121,7 @@ export function CrossHistory() {
                     className="text-[11px] mt-1"
                     style={{ color: "var(--red)" }}
                   >
-                    この記録を削除
+                    {t("この記録を削除")}
                   </button>
                 </div>
               )}

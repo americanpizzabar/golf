@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { LanguageToggle, useT } from "@/lib/i18n";
 
 export function PageHeader({
   title,
@@ -13,13 +14,14 @@ export function PageHeader({
   back?: boolean;
 }) {
   const router = useRouter();
+  const t = useT();
   return (
     <header className="px-4 pt-5 pb-3 flex items-center gap-3">
       {back && (
         <button
           onClick={() => router.back()}
           className="btn btn-ghost w-9 h-9 grid place-items-center text-lg"
-          aria-label="戻る"
+          aria-label={t("戻る")}
         >
           ‹
         </button>
@@ -32,6 +34,7 @@ export function PageHeader({
           </p>
         )}
       </div>
+      <LanguageToggle className="ml-auto self-start" />
     </header>
   );
 }
@@ -88,12 +91,13 @@ const sevLabel: Record<string, string> = {
 };
 
 export function SeverityBadge({ severity }: { severity: string }) {
+  const t = useT();
   return (
     <span
       className="text-[10px] font-bold px-2 py-0.5 rounded-full"
       style={{ background: sevColor[severity] + "22", color: sevColor[severity] }}
     >
-      {sevLabel[severity] ?? severity}
+      {sevLabel[severity] ? t(sevLabel[severity]) : severity}
     </span>
   );
 }

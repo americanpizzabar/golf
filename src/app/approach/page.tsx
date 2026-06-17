@@ -14,6 +14,7 @@ import { PageHeader, Card, Stat } from "@/components/ui";
 import { LIE_LABELS, LIE_ORDER, dispersionStats } from "@/lib/golf";
 import { fetchApproaches, saveApproach } from "@/lib/db";
 import type { ApproachSession, LieType, Shot } from "@/lib/types";
+import { useT } from "@/lib/i18n";
 
 const ZONE_COLOR: Record<Shot["zone"], string> = {
   holed: "#fbbf24",
@@ -73,6 +74,7 @@ function ellipsePath(pin: V2, vR: V2, vD: V2, wx: number, wd: number, steps = 48
 }
 
 export default function ApproachPage() {
+  const t = useT();
   const [tab, setTab] = useState<"record" | "data">("record");
   const [sessions, setSessions] = useState<ApproachSession[]>([]);
 
@@ -85,21 +87,21 @@ export default function ApproachPage() {
 
   return (
     <main>
-      <PageHeader title="アプローチ計測" subtitle="目標点を設定して着弾を自動計測" back />
+      <PageHeader title={t("アプローチ計測")} subtitle={t("目標点を設定して着弾を自動計測")} back />
       <div className="px-4">
         <div className="flex gap-2 mb-4">
-          {(["record", "data"] as const).map((t) => (
+          {(["record", "data"] as const).map((tb) => (
             <button
-              key={t}
-              onClick={() => setTab(t)}
+              key={tb}
+              onClick={() => setTab(tb)}
               className="btn flex-1 py-2.5 text-sm"
               style={{
-                background: tab === t ? "var(--green)" : "var(--card)",
-                color: tab === t ? "#03260f" : "var(--fg)",
+                background: tab === tb ? "var(--green)" : "var(--card)",
+                color: tab === tb ? "#03260f" : "var(--fg)",
                 border: "1px solid var(--line)",
               }}
             >
-              {t === "record" ? "🎯 計測する" : "📊 データを見る"}
+              {tb === "record" ? t("🎯 計測する") : t("📊 データを見る")}
             </button>
           ))}
         </div>
@@ -115,6 +117,7 @@ export default function ApproachPage() {
 }
 
 function Recorder({ onSaved }: { onSaved: () => void }) {
+  const t = useT();
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const diffRef = useRef<HTMLCanvasElement | null>(null);
@@ -166,7 +169,7 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
 
   async function startCam() {
     if (!navigator.mediaDevices?.getUserMedia) {
-      alert("このブラウザ/接続ではカメラを利用できません（HTTPS環境が必要です）。");
+      alert(t("このブラウザ/接続ではカメラを利用できません（HTTPS環境が必要です）。"));
       return;
     }
     let s: MediaStream | null = null;
@@ -176,7 +179,7 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
       try {
         s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       } catch {
-        alert("カメラを起動できませんでした。権限を確認してください。");
+        alert(t("カメラを起動できませんでした。権限を確認してください。"));
         return;
       }
     }
@@ -273,8 +276,8 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
     if (!p) return;
     // Perspective-correct: convert the screen point to true ground meters.
     const { a, b } = toGround({ x: nx, y: ny }, p, vRRef.current, vDRef.current);
-    const t = SHAPES[shapeRef.current];
-    const zone = zoneOfAB(a, b, t.wx, t.wd);
+    const tShape = SHAPES[shapeRef.current];
+    const zone = zoneOfAB(a, b, tShape.wx, tShape.wd);
     // Store dx = right(+), dy = away/long(+). b is toward camera, so dy = -b.
     const shot: Shot = { dx: round1(a), dy: round1(-b), zone };
     setShots((s) => [...s, shot]);
@@ -408,7 +411,7 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
               <div>
                 <div className="text-4xl mb-2">🎯</div>
                 <p className="text-sm" style={{ color: "var(--muted)" }}>
-                  カメラをグリーンに向けて<br />目標点（ピン）を設定します
+                  {t("カメラをグリーンに向けて")}<br />{t("目標点（ピン）を設定します")}
                 </p>
               </div>
             </div>
@@ -418,19 +421,19 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
             <div className="absolute top-2 left-2 px-3 py-1 rounded-full text-xs font-bold"
               style={{ background: phase === "measuring" ? "var(--red)" : "rgba(0,0,0,0.6)", color: "#fff" }}>
               {phase === "measuring"
-                ? flash ? "● 着弾を記録！" : "● 計測中… 着弾を自動検知"
+                ? flash ? t("● 着弾を記録！") : t("● 計測中… 着弾を自動検知")
                 : calibStep === "pin"
-                  ? "① ピン（カップ）をタップ"
+                  ? t("① ピン（カップ）をタップ")
                   : calibStep === "near"
-                    ? "② ピンから「手前1m」をタップ"
+                    ? t("② ピンから「手前1m」をタップ")
                     : calibStep === "right"
-                      ? "③ ピンから「右1m」をタップ"
-                      : "較正完了（タップでピンを置き直し）"}
+                      ? t("③ ピンから「右1m」をタップ")
+                      : t("較正完了（タップでピンを置き直し）")}
             </div>
           )}
           {camOn && (
             <button onClick={stopCam} className="absolute top-2 right-2 btn btn-ghost text-xs px-3 py-1.5">
-              カメラOFF
+              {t("カメラOFF")}
             </button>
           )}
         </div>
@@ -438,33 +441,33 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
 
       {!camOn ? (
         <button onClick={startCam} className="btn btn-primary w-full py-3.5">
-          📷 カメラを起動して目標を設定
+          {t("📷 カメラを起動して目標を設定")}
         </button>
       ) : phase === "target" ? (
         <>
           <Card className="space-y-2">
             <div className="text-xs" style={{ color: "var(--muted)" }}>
-              地面の遠近を較正：3点をタップすると、奥行きと左右の尺度をAIが算出し、手前は広く奥は狭い「3D楕円ターゲット」を表示します。
+              {t("地面の遠近を較正：3点をタップすると、奥行きと左右の尺度をAIが算出し、手前は広く奥は狭い「3D楕円ターゲット」を表示します。")}
             </div>
             <div className="grid grid-cols-3 gap-1.5 text-center text-[11px]">
               <div className="rounded-lg py-1.5" style={{ background: pin ? "var(--green)" : "var(--bg-soft)", color: pin ? "#03260f" : "var(--muted)" }}>
-                ① ピン
+                {t("① ピン")}
               </div>
               <div className="rounded-lg py-1.5" style={{ background: near ? "var(--green)" : "var(--bg-soft)", color: near ? "#03260f" : "var(--muted)" }}>
-                ② 手前1m
+                {t("② 手前1m")}
               </div>
               <div className="rounded-lg py-1.5" style={{ background: right ? "var(--green)" : "var(--bg-soft)", color: right ? "#03260f" : "var(--muted)" }}>
-                ③ 右1m
+                {t("③ 右1m")}
               </div>
             </div>
             <button onClick={resetCalib} className="btn btn-ghost py-2 w-full text-xs">
-              ↺ 較正をやり直す
+              {t("↺ 較正をやり直す")}
             </button>
           </Card>
 
           <Card>
             <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-              ターゲット形状（練習の狙いに合わせて選択）
+              {t("ターゲット形状（練習の狙いに合わせて選択）")}
             </div>
             <div className="grid grid-cols-3 gap-1.5">
               {(Object.keys(SHAPES) as ShapeKey[]).map((k) => (
@@ -478,19 +481,19 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
                     border: "1px solid var(--line)",
                   }}
                 >
-                  {SHAPES[k].label}
+                  {t(SHAPES[k].label)}
                 </button>
               ))}
             </div>
           </Card>
 
           <button onClick={startMeasuring} disabled={!calibrated} className="btn btn-primary w-full py-3.5 disabled:opacity-40">
-            ▶ 計測開始（着弾を自動検知）
+            {t("▶ 計測開始（着弾を自動検知）")}
           </button>
         </>
       ) : (
         <button onClick={stopMeasuring} className="btn py-3.5 w-full font-bold" style={{ background: "var(--red)", color: "#fff" }}>
-          ■ 計測を停止
+          {t("■ 計測を停止")}
         </button>
       )}
 
@@ -498,37 +501,37 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
       <Card className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
           <label className="block">
-            <span className="text-xs" style={{ color: "var(--muted)" }}>ライの状況</span>
+            <span className="text-xs" style={{ color: "var(--muted)" }}>{t("ライの状況")}</span>
             <select value={lie} onChange={(e) => setLie(e.target.value as LieType)} className="w-full px-3 py-2.5 mt-1">
               {LIE_ORDER.map((l) => (
-                <option key={l} value={l}>{LIE_LABELS[l]}</option>
+                <option key={l} value={l}>{t(LIE_LABELS[l])}</option>
               ))}
             </select>
           </label>
           <label className="block">
-            <span className="text-xs" style={{ color: "var(--muted)" }}>距離 (m)</span>
+            <span className="text-xs" style={{ color: "var(--muted)" }}>{t("距離 (m)")}</span>
             <input type="number" inputMode="numeric" value={distance} onChange={(e) => setDistance(e.target.value)} className="w-full px-3 py-2.5 mt-1" />
           </label>
         </div>
       </Card>
 
       <div className="grid grid-cols-4 gap-2">
-        <Stat label="打数" value={tally.attempts} accent="var(--fg)" />
-        <Stat label="1m以内" value={tally.in_1m} accent="var(--green)" />
-        <Stat label="成功率" value={rate1} unit="%" accent="var(--cyan)" />
-        <Stat label="カップイン" value={tally.holed} accent="#fbbf24" />
+        <Stat label={t("打数")} value={tally.attempts} accent="var(--fg)" />
+        <Stat label={t("1m以内")} value={tally.in_1m} accent="var(--green)" />
+        <Stat label={t("成功率")} value={rate1} unit="%" accent="var(--cyan)" />
+        <Stat label={t("カップイン")} value={tally.holed} accent="#fbbf24" />
       </div>
 
       <button onClick={() => setShots((s) => s.slice(0, -1))} disabled={!shots.length} className="btn btn-ghost py-3 w-full disabled:opacity-40">
-        ↩ 直前の1球を取り消し
+        {t("↩ 直前の1球を取り消し")}
       </button>
 
       <button onClick={save} disabled={!tally.attempts} className="btn btn-primary w-full py-3.5 disabled:opacity-40">
-        このセッションを保存（{tally.attempts}球）
+        {t("このセッションを保存（{n}球）", { n: tally.attempts })}
       </button>
 
       <p className="text-[11px] leading-relaxed px-1" style={{ color: "var(--muted)" }}>
-        ※ 計測開始後はカメラ映像の背景差分で着弾（動きが止まった位置）を常時自動検知します。撮影環境により精度は変わるため、検知漏れ時は画面を直接タップして着弾点を記録できます（β）。
+        {t("※ 計測開始後はカメラ映像の背景差分で着弾（動きが止まった位置）を常時自動検知します。撮影環境により精度は変わるため、検知漏れ時は画面を直接タップして着弾点を記録できます（β）。")}
       </p>
     </div>
   );
@@ -539,13 +542,14 @@ const D_C = D_SVG / 2;
 const D_PXM = 30;
 
 function DataView({ sessions }: { sessions: ApproachSession[] }) {
+  const t = useT();
   const [lieFilter, setLieFilter] = useState<LieType | "all">("all");
 
   const byLie = LIE_ORDER.map((l) => {
     const s = sessions.filter((x) => x.lie_type === l);
     const att = s.reduce((a, x) => a + x.attempts, 0);
     const in1 = s.reduce((a, x) => a + x.in_1m, 0);
-    return { lie: l, name: LIE_LABELS[l], attempts: att, rate: att ? Math.round((in1 / att) * 100) : 0 };
+    return { lie: l, name: t(LIE_LABELS[l]), attempts: att, rate: att ? Math.round((in1 / att) * 100) : 0 };
   }).filter((d) => d.attempts > 0);
 
   const totalAtt = sessions.reduce((a, x) => a + x.attempts, 0);
@@ -563,7 +567,7 @@ function DataView({ sessions }: { sessions: ApproachSession[] }) {
   if (totalAtt === 0) {
     return (
       <Card className="text-center py-10 text-sm" style={{ color: "var(--muted)" }}>
-        まだデータがありません。<br />「計測する」から記録を始めましょう。
+        {t("まだデータがありません。")}<br />{t("「計測する」から記録を始めましょう。")}
       </Card>
     );
   }
@@ -571,19 +575,19 @@ function DataView({ sessions }: { sessions: ApproachSession[] }) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-3 gap-2">
-        <Stat label="総打数" value={totalAtt} accent="var(--fg)" />
-        <Stat label="1m成功率" value={overall} unit="%" accent="var(--green)" />
-        <Stat label="カップイン" value={totalHoled} accent="#fbbf24" />
+        <Stat label={t("総打数")} value={totalAtt} accent="var(--fg)" />
+        <Stat label={t("1m成功率")} value={overall} unit="%" accent="var(--green)" />
+        <Stat label={t("カップイン")} value={totalHoled} accent="#fbbf24" />
       </div>
 
       {weakest && weakest.rate < 50 && (
         <Card>
           <div className="text-sm">
-            <span style={{ color: "var(--red)" }}>🔻 明確な弱点：</span>{" "}
-            <b>{weakest.name}</b> の成功率は <b>{weakest.rate}%</b>。
+            <span style={{ color: "var(--red)" }}>{t("🔻 明確な弱点：")}</span>{" "}
+            <b>{weakest.name}</b> {t("の成功率は")} <b>{weakest.rate}%</b>{t("。")}
           </div>
           <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>
-            AIコーチがこの状況のドリルを優先して提案します。
+            {t("AIコーチがこの状況のドリルを優先して提案します。")}
           </div>
         </Card>
       )}
@@ -591,11 +595,11 @@ function DataView({ sessions }: { sessions: ApproachSession[] }) {
       {disp && (
         <Card>
           <div className="flex items-center justify-between mb-2">
-            <div className="text-xs" style={{ color: "var(--muted)" }}>ディスパーション・マップ（着弾の散らばり）</div>
+            <div className="text-xs" style={{ color: "var(--muted)" }}>{t("ディスパーション・マップ（着弾の散らばり）")}</div>
             <select value={lieFilter} onChange={(e) => setLieFilter(e.target.value as LieType | "all")} className="text-xs px-2 py-1">
-              <option value="all">全ライ</option>
+              <option value="all">{t("全ライ")}</option>
               {LIE_ORDER.map((l) => (
-                <option key={l} value={l}>{LIE_LABELS[l]}</option>
+                <option key={l} value={l}>{t(LIE_LABELS[l])}</option>
               ))}
             </select>
           </div>
@@ -621,15 +625,15 @@ function DataView({ sessions }: { sessions: ApproachSession[] }) {
           </svg>
           <div className="mt-2 rounded-xl p-3" style={{ background: "var(--bg-soft)" }}>
             <div className="text-sm">
-              重心は <b style={{ color: "var(--cyan)" }}>{disp.dirLabel}</b>（ピンから約{disp.dist.toFixed(1)}m）・バラつき {disp.spread.toFixed(1)}m
+              {t("重心は")} <b style={{ color: "var(--cyan)" }}>{t(disp.dirLabel)}</b>{t("（ピンから約{d}m）・バラつき {s}m", { d: disp.dist.toFixed(1), s: disp.spread.toFixed(1) })}
             </div>
-            <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>{disp.causeText}</div>
+            <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>{t(disp.causeText)}</div>
           </div>
         </Card>
       )}
 
       <Card>
-        <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>状況別 1m成功率</div>
+        <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>{t("状況別 1m成功率")}</div>
         <ResponsiveContainer width="100%" height={Math.max(180, byLie.length * 44)}>
           <BarChart data={byLie} layout="vertical" margin={{ left: 10, right: 20 }}>
             <XAxis type="number" domain={[0, 100]} hide />
@@ -639,7 +643,7 @@ function DataView({ sessions }: { sessions: ApproachSession[] }) {
               contentStyle={{ background: "#16233a", border: "1px solid #243651", borderRadius: 12, fontSize: 12 }}
               formatter={(value, _name, item) => {
                 const p = item as unknown as { payload: { attempts: number } };
-                return [`${value}% (${p.payload.attempts}球)`, "成功率"];
+                return [t("{v}% ({n}球)", { v: value as number, n: p.payload.attempts }), t("成功率")];
               }}
             />
             <Bar dataKey="rate" radius={[0, 8, 8, 0]} label={{ position: "right", fill: "#eaf2ff", fontSize: 11, formatter: (v) => `${v}%` }}>
@@ -652,11 +656,11 @@ function DataView({ sessions }: { sessions: ApproachSession[] }) {
       </Card>
 
       <Card>
-        <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>履歴</div>
+        <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>{t("履歴")}</div>
         <div className="space-y-1.5">
           {sessions.slice(0, 12).map((s) => (
             <div key={s.id} className="flex items-center justify-between text-sm">
-              <span>{LIE_LABELS[s.lie_type]} · {s.distance_m ?? "—"}m</span>
+              <span>{t(LIE_LABELS[s.lie_type])} · {s.distance_m ?? "—"}m</span>
               <span style={{ color: "var(--muted)" }}>
                 {s.in_1m}/{s.attempts}（{s.attempts ? Math.round((s.in_1m / s.attempts) * 100) : 0}%）
               </span>

@@ -32,8 +32,10 @@ import {
 } from "@/lib/ghost-sync";
 import { fetchSwings, getProfile, fetchPros } from "@/lib/db";
 import type { Swing, Pro } from "@/lib/types";
+import { useT } from "@/lib/i18n";
 
 export default function GhostPage() {
+  const t = useT();
   const [swings, setSwings] = useState<Swing[]>([]);
   const [model, setModel] = useState<Swing | null>(null);
   const [modelDtl, setModelDtl] = useState<number[][] | null>(null);
@@ -88,33 +90,33 @@ export default function GhostPage() {
 
   return (
     <main>
-      <PageHeader title="ゴースト・フレーム同期" subtitle="8イベントで完全同期・関節ズレを可視化" back />
+      <PageHeader title={t("ゴースト・フレーム同期")} subtitle={t("8イベントで完全同期・関節ズレを可視化")} back />
       <div className="px-4 space-y-4">
         {!loaded ? (
-          <Card className="text-center py-8"><Spinner label="読み込み中…" /></Card>
+          <Card className="text-center py-8"><Spinner label={t("読み込み中…")} /></Card>
         ) : swings.length < 1 ? (
           <Card className="text-center py-10 text-sm" style={{ color: "var(--muted)" }}>
-            比較には保存済みスイングが必要です。<br />
-            <Link href="/swing" style={{ color: "var(--green)" }}>スイング解析</Link>
-            を保存すると、お手本モデルと重ねて比較できます。
+            {t("比較には保存済みスイングが必要です。")}<br />
+            <Link href="/swing" style={{ color: "var(--green)" }}>{t("スイング解析")}</Link>
+            {t("を保存すると、お手本モデルと重ねて比較できます。")}
           </Card>
         ) : (
           <>
             <Card>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block">
-                  <span className="text-xs" style={{ color: "var(--cyan)" }}>● 現在（青）</span>
+                  <span className="text-xs" style={{ color: "var(--cyan)" }}>{t("● 現在（青）")}</span>
                   <select value={aId} onChange={(e) => setAId(e.target.value)} className="w-full px-2 py-2 mt-1 text-sm">
                     {swings.map((s) => (
-                      <option key={s.id} value={s.id}>{label(s)}</option>
+                      <option key={s.id} value={s.id}>{t(label(s))}</option>
                     ))}
                   </select>
                 </label>
                 <label className="block">
-                  <span className="text-xs" style={{ color: "var(--amber)" }}>● ゴースト（橙）</span>
+                  <span className="text-xs" style={{ color: "var(--amber)" }}>{t("● ゴースト（橙）")}</span>
                   <select value={bId} onChange={(e) => setBId(e.target.value)} className="w-full px-2 py-2 mt-1 text-sm">
                     {ghostChoices.map((s) => (
-                      <option key={s.id} value={s.id}>{label(s)}</option>
+                      <option key={s.id} value={s.id}>{t(label(s))}</option>
                     ))}
                   </select>
                 </label>
@@ -124,9 +126,9 @@ export default function GhostPage() {
             <Card>
               <div className="flex items-center justify-between">
                 <div className="text-sm">
-                  <span style={{ color: "var(--muted)" }}>アングル自動判別：</span>
-                  <span className="font-bold" style={{ color: "var(--cyan)" }}>{ANGLE_LABEL[angle]}</span>
-                  {!angleOverride && <span className="text-[11px] ml-1" style={{ color: "var(--muted)" }}>（自動）</span>}
+                  <span style={{ color: "var(--muted)" }}>{t("アングル自動判別：")}</span>
+                  <span className="font-bold" style={{ color: "var(--cyan)" }}>{t(ANGLE_LABEL[angle])}</span>
+                  {!angleOverride && <span className="text-[11px] ml-1" style={{ color: "var(--muted)" }}>{t("（自動）")}</span>}
                 </div>
                 <div className="flex gap-1">
                   {([["自動", null], ["正面", "front"], ["後方", "dtl"]] as const).map(([lbl, v]) => (
@@ -139,15 +141,15 @@ export default function GhostPage() {
                         color: (angleOverride ?? "auto") === (v ?? "auto") ? "#03260f" : "var(--muted)",
                       }}
                     >
-                      {lbl}
+                      {t(lbl)}
                     </button>
                   ))}
                 </div>
               </div>
               <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
                 {angle === "front"
-                  ? "正面：頭の上下動（軸の上下ブレ）と腰のスウェー（左右ブレ）をガイド表示します。"
-                  : "後方(DTL)：スイングプレーンとお尻の壁（アーリーエクステンション）をガイド表示します。"}
+                  ? t("正面：頭の上下動（軸の上下ブレ）と腰のスウェー（左右ブレ）をガイド表示します。")
+                  : t("後方(DTL)：スイングプレーンとお尻の壁（アーリーエクステンション）をガイド表示します。")}
               </div>
             </Card>
 
@@ -201,6 +203,7 @@ const SPEEDS = [
 ];
 
 function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][]; leftHanded: boolean; angle: ViewAngle }) {
+  const t = useT();
   const SIZE = 360;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
@@ -296,7 +299,7 @@ function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][];
         const warn = bob > 0.04 || sway > 0.04;
         ctx.fillStyle = warn ? "#f43f5e" : "#7dd3fc";
         ctx.beginPath(); ctx.arc(TA[LM.nose].x * SIZE, TA[LM.nose].y * SIZE, 4, 0, Math.PI * 2); ctx.fill();
-        guideRef.current = `頭の上下 ${(bob * cmPerUnit).toFixed(1)}cm ／ 腰スウェー ${(sway * cmPerUnit).toFixed(1)}cm`;
+        guideRef.current = t("頭の上下 {bob}cm ／ 腰スウェー {sway}cm", { bob: (bob * cmPerUnit).toFixed(1), sway: (sway * cmPerUnit).toFixed(1) });
       } else {
         const wx = TA0[leadW].x * SIZE;
         const wy = TA0[leadW].y * SIZE;
@@ -316,7 +319,7 @@ function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][];
         const move = Math.abs(TA[trailHip].x - TA0[trailHip].x);
         ctx.fillStyle = move > 0.05 ? "#f43f5e" : "#7dd3fc";
         ctx.beginPath(); ctx.arc(TA[trailHip].x * SIZE, TA[trailHip].y * SIZE, 4, 0, Math.PI * 2); ctx.fill();
-        guideRef.current = `お尻の前後動 ${(move * cmPerUnit).toFixed(1)}cm（壁からのズレ）`;
+        guideRef.current = t("お尻の前後動 {move}cm（壁からのズレ）", { move: (move * cmPerUnit).toFixed(1) });
       }
       ctx.restore();
 
@@ -331,7 +334,7 @@ function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][];
     };
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [a, b, eventsA, eventsB, txA, txB, angle, leftHanded]);
+  }, [a, b, eventsA, eventsB, txA, txB, angle, leftHanded, t]);
 
   const seek = (p: number) => {
     phaseRef.current = Math.max(0, Math.min(1, p));
@@ -343,7 +346,7 @@ function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][];
     <Card className="p-3">
       <div className="flex items-center justify-between mb-2">
         <div className="text-xs font-bold" style={{ color: "var(--fg)" }}>
-          {phaseEventName(phase)}
+          {t(phaseEventName(phase))}
         </div>
         <div className="flex gap-1">
           {SPEEDS.map((s, i) => (
@@ -371,7 +374,7 @@ function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][];
         <button
           onClick={() => { setPlaying(false); seek(phaseRef.current - stepDelta); }}
           className="btn btn-ghost w-9 h-9 grid place-items-center"
-          aria-label="1コマ戻る"
+          aria-label={t("1コマ戻る")}
         >
           ◀
         </button>
@@ -384,7 +387,7 @@ function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][];
         <button
           onClick={() => { setPlaying(false); seek(phaseRef.current + stepDelta); }}
           className="btn btn-ghost w-9 h-9 grid place-items-center"
-          aria-label="1コマ進む"
+          aria-label={t("1コマ進む")}
         >
           ▶|
         </button>
@@ -413,7 +416,7 @@ function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][];
                 color: active ? "#04121f" : "var(--muted)",
               }}
             >
-              {name}
+              {t(name)}
             </button>
           );
         })}
@@ -423,7 +426,7 @@ function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][];
       {guide && (
         <div className="mt-2 flex items-center gap-2 text-xs">
           <span className="px-1.5 py-0.5 rounded text-[10px] font-bold" style={{ background: "var(--cyan)", color: "#04121f" }}>
-            {angle === "front" ? "正面チェック" : "後方チェック"}
+            {angle === "front" ? t("正面チェック") : t("後方チェック")}
           </span>
           <span style={{ color: "var(--muted)" }}>{guide}</span>
         </div>
@@ -432,20 +435,20 @@ function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][];
       {/* Heat-map readout */}
       <div className="mt-3">
         <div className="text-[11px] mb-1" style={{ color: "var(--muted)" }}>
-          関節ズレ（この局面で お手本 とズレている部位）
+          {t("関節ズレ（この局面で お手本 とズレている部位）")}
         </div>
         {alerts.length === 0 ? (
-          <div className="text-xs" style={{ color: "var(--green)" }}>✓ 大きなズレはありません</div>
+          <div className="text-xs" style={{ color: "var(--green)" }}>{t("✓ 大きなズレはありません")}</div>
         ) : (
           <div className="space-y-1">
             {alerts.slice(0, 3).map((d) => (
               <div key={d.name} className="flex items-center justify-between text-xs">
                 <span className="flex items-center gap-1.5">
                   <span className="inline-block w-2 h-2 rounded-full" style={{ background: "#f43f5e" }} />
-                  {d.name}
+                  {t(d.name)}
                 </span>
                 <span style={{ color: "var(--muted)" }}>
-                  あなた<span style={{ color: "var(--fg)" }}>{d.you}°</span> / お手本{d.ref}°（差{Math.round(d.diff)}°）
+                  {t("あなた")}<span style={{ color: "var(--fg)" }}>{d.you}°</span> {t("/ お手本{ref}°（差{diff}°）", { ref: d.ref, diff: Math.round(d.diff) })}
                 </span>
               </div>
             ))}
@@ -453,14 +456,14 @@ function SyncPlayer({ a, b, leftHanded, angle }: { a: number[][]; b: number[][];
         )}
       </div>
       <p className="text-[10px] mt-2" style={{ color: "var(--muted)" }}>
-        8つの骨格イベントで再生速度を自動同期。スライダーや◀▶で1コマずつ重ね合わせて確認できます。
-        ズレ判定は2D骨格からの推定です。
+        {t("8つの骨格イベントで再生速度を自動同期。スライダーや◀▶で1コマずつ重ね合わせて確認できます。ズレ判定は2D骨格からの推定です。")}
       </p>
     </Card>
   );
 }
 
 function KinematicSequence({ frames, leftHanded }: { frames: number[][]; leftHanded: boolean }) {
+  const t = useT();
   const { data, verdict, impactPct } = useMemo(() => {
     const k = kinematics(frames, leftHanded);
     const ev = detectEvents(frames, leftHanded);
@@ -488,12 +491,12 @@ function KinematicSequence({ frames, leftHanded }: { frames: number[][]; leftHan
   return (
     <Card>
       <div className="text-xs mb-1" style={{ color: "var(--muted)" }}>
-        キネマティック・シーケンス（加速の順番）
+        {t("キネマティック・シーケンス（加速の順番）")}
       </div>
       <div className="text-sm mb-2">
-        加速順: <span className="font-bold">{verdict.order.join(" → ")}</span>{" "}
+        {t("加速順:")} <span className="font-bold">{verdict.order.map((o) => t(o)).join(" → ")}</span>{" "}
         <span style={{ color: verdict.good ? "var(--green)" : "var(--amber)" }}>
-          {verdict.good ? "✓ 効率の良い連鎖" : "腕が先行＝手打ち傾向"}
+          {verdict.good ? t("✓ 効率の良い連鎖") : t("腕が先行＝手打ち傾向")}
         </span>
       </div>
       <ResponsiveContainer width="100%" height={200}>
@@ -503,13 +506,13 @@ function KinematicSequence({ frames, leftHanded }: { frames: number[][]; leftHan
           <Tooltip contentStyle={{ background: "#16233a", border: "1px solid #243651", borderRadius: 12, fontSize: 12 }} />
           <Legend wrapperStyle={{ fontSize: 11 }} />
           <ReferenceLine x={impactPct} stroke="#f43f5e" strokeDasharray="3 3" label={{ value: "IMP", fill: "#f43f5e", fontSize: 10 }} />
-          <Line type="monotone" dataKey="pelvis" name="骨盤" stroke="#22c55e" strokeWidth={2.5} dot={false} />
-          <Line type="monotone" dataKey="thorax" name="胸郭" stroke="#22d3ee" strokeWidth={2.5} dot={false} />
-          <Line type="monotone" dataKey="arm" name="腕" stroke="#f59e0b" strokeWidth={2.5} dot={false} />
+          <Line type="monotone" dataKey="pelvis" name={t("骨盤")} stroke="#22c55e" strokeWidth={2.5} dot={false} />
+          <Line type="monotone" dataKey="thorax" name={t("胸郭")} stroke="#22d3ee" strokeWidth={2.5} dot={false} />
+          <Line type="monotone" dataKey="arm" name={t("腕")} stroke="#f59e0b" strokeWidth={2.5} dot={false} />
         </LineChart>
       </ResponsiveContainer>
       <p className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
-        プロは「骨盤→胸郭→腕」の順にピークが現れます。各線は自分の最大値で正規化したピークタイミングです。
+        {t("プロは「骨盤→胸郭→腕」の順にピークが現れます。各線は自分の最大値で正規化したピークタイミングです。")}
       </p>
     </Card>
   );

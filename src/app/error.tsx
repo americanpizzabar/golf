@@ -20,16 +20,16 @@ export default function Error({
     <main className="min-h-screen grid place-items-center px-6" style={{ background: "var(--bg)" }}>
       <div className="text-center max-w-sm">
         <div className="text-4xl mb-3">⚠️</div>
-        <h1 className="text-lg font-bold mb-1">問題が発生しました</h1>
+        <h1 className="text-lg font-bold mb-1">Something went wrong</h1>
         <p className="text-sm mb-4" style={{ color: "var(--muted)" }}>
-          画面の読み込み中にエラーが起きました。もう一度お試しください。
+          An error occurred while loading the screen. Please try again.
         </p>
         <div className="flex gap-2 justify-center">
           <button onClick={reset} className="btn btn-primary px-5 py-2.5">
-            再試行
+            Retry
           </button>
           <button onClick={() => (window.location.href = "/")} className="btn btn-ghost px-5 py-2.5">
-            ホームへ
+            Home
           </button>
         </div>
         {error?.message && (

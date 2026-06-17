@@ -10,7 +10,7 @@ export default function GlobalError({
   reset: () => void;
 }) {
   return (
-    <html lang="ja">
+    <html lang="en">
       <body
         style={{
           margin: 0,
@@ -25,9 +25,9 @@ export default function GlobalError({
       >
         <div style={{ textAlign: "center", maxWidth: 360 }}>
           <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
-          <h1 style={{ fontSize: 18, margin: "0 0 6px" }}>問題が発生しました</h1>
+          <h1 style={{ fontSize: 18, margin: "0 0 6px" }}>Something went wrong</h1>
           <p style={{ fontSize: 13, color: "#93a4bf", margin: "0 0 16px" }}>
-            もう一度お試しください。
+            Please try again.
           </p>
           <button
             onClick={reset}
@@ -40,7 +40,7 @@ export default function GlobalError({
               fontWeight: 700,
             }}
           >
-            再試行
+            Retry
           </button>
           {error?.message && (
             <pre

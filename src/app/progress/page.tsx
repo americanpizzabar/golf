@@ -14,8 +14,10 @@ import {
 import { PageHeader, Card, Stat } from "@/components/ui";
 import { fetchSwings } from "@/lib/db";
 import type { Swing } from "@/lib/types";
+import { useT } from "@/lib/i18n";
 
 export default function ProgressPage() {
+  const t = useT();
   const [swings, setSwings] = useState<Swing[]>([]);
   const [loaded, setLoaded] = useState(false);
 
@@ -50,35 +52,35 @@ export default function ProgressPage() {
 
   return (
     <main>
-      <PageHeader title="成長ログ" subtitle="あなたの上達を記録・予測" back />
+      <PageHeader title={t("成長ログ")} subtitle={t("あなたの上達を記録・予測")} back />
       <div className="px-4 space-y-4">
         {!loaded ? (
           <Card className="text-center py-8 text-sm" style={{ color: "var(--muted)" }}>
-            読み込み中…
+            {t("読み込み中…")}
           </Card>
         ) : swings.length === 0 ? (
           <Card className="text-center py-10 text-sm" style={{ color: "var(--muted)" }}>
-            まだ記録がありません。<br />
-            <Link href="/swing" style={{ color: "var(--green)" }}>スイング解析</Link>
-            を保存すると成長が見えます。
+            {t("まだ記録がありません。")}<br />
+            <Link href="/swing" style={{ color: "var(--green)" }}>{t("スイング解析")}</Link>
+            {t("を保存すると成長が見えます。")}
           </Card>
         ) : (
           <>
             <div className="grid grid-cols-3 gap-2">
-              <Stat label="最新シンクロ" value={latest?.sync_rate ?? "—"} unit="%" accent="var(--cyan)" />
+              <Stat label={t("最新シンクロ")} value={latest?.sync_rate ?? "—"} unit="%" accent="var(--cyan)" />
               <Stat
-                label="成長幅"
+                label={t("成長幅")}
                 value={`${delta >= 0 ? "+" : ""}${delta}`}
                 unit="pt"
                 accent={delta >= 0 ? "var(--green)" : "var(--red)"}
               />
-              <Stat label="解析数" value={swings.length} accent="var(--amber)" />
+              <Stat label={t("解析数")} value={swings.length} accent="var(--amber)" />
             </div>
 
             {/* Sync trend */}
             <Card>
               <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-                シンクロ率の推移
+                {t("シンクロ率の推移")}
               </div>
               <ResponsiveContainer width="100%" height={200}>
                 <LineChart data={chart} margin={{ top: 8, right: 12, left: -18, bottom: 0 }}>
@@ -86,10 +88,10 @@ export default function ProgressPage() {
                   <YAxis domain={[0, 100]} tick={{ fill: "#93a4bf", fontSize: 10 }} axisLine={false} tickLine={false} />
                   <Tooltip
                     contentStyle={{ background: "#16233a", border: "1px solid #243651", borderRadius: 12, fontSize: 12 }}
-                    formatter={(v) => [`${v}%`, "シンクロ率"]}
+                    formatter={(v) => [`${v}%`, t("シンクロ率")]}
                   />
                   {prediction != null && (
-                    <ReferenceLine y={prediction} stroke="#8b5cf6" strokeDasharray="4 4" label={{ value: `予測 ${prediction}%`, fill: "#8b5cf6", fontSize: 10, position: "insideTopRight" }} />
+                    <ReferenceLine y={prediction} stroke="#8b5cf6" strokeDasharray="4 4" label={{ value: t("予測 {prediction}%", { prediction }), fill: "#8b5cf6", fontSize: 10, position: "insideTopRight" }} />
                   )}
                   <Line type="monotone" dataKey="sync" stroke="#22d3ee" strokeWidth={3} dot={{ r: 3, fill: "#22d3ee" }} />
                 </LineChart>
@@ -100,12 +102,12 @@ export default function ProgressPage() {
             {prediction != null && (
               <Card className="relative overflow-hidden">
                 <div className="absolute -right-8 -top-8 w-32 h-32 rounded-full opacity-20" style={{ background: "#8b5cf6" }} />
-                <div className="text-xs" style={{ color: "var(--muted)" }}>🔮 1年後の自分予測</div>
+                <div className="text-xs" style={{ color: "var(--muted)" }}>🔮 {t("1年後の自分予測")}</div>
                 <div className="mt-1 text-3xl font-extrabold" style={{ color: "#a78bfa" }}>
-                  シンクロ率 {prediction}%
+                  {t("シンクロ率 {prediction}%", { prediction })}
                 </div>
                 <p className="text-xs mt-1" style={{ color: "var(--muted)" }}>
-                  現在のペースで週1回の解析を続けた場合の予測値です。
+                  {t("現在のペースで週1回の解析を続けた場合の予測値です。")}
                 </p>
               </Card>
             )}
@@ -114,20 +116,20 @@ export default function ProgressPage() {
             {first && latest && first.id !== latest.id && (
               <Card>
                 <div className="text-xs mb-3" style={{ color: "var(--muted)" }}>
-                  タイムラプス比較（最初 → 最新）
+                  {t("タイムラプス比較（最初 → 最新）")}
                 </div>
                 <div className="space-y-2">
-                  <CompareRow label="シンクロ率" a={first.sync_rate} b={latest.sync_rate} unit="%" higherBetter />
-                  <CompareRow label="肩の回転" a={first.shoulder_turn_deg} b={latest.shoulder_turn_deg} unit="°" higherBetter />
-                  <CompareRow label="軸ブレ" a={swayOf(first)} b={swayOf(latest)} unit="cm" higherBetter={false} />
-                  <CompareRow label="悪癖の数" a={first.faults?.length ?? 0} b={latest.faults?.length ?? 0} unit="件" higherBetter={false} />
+                  <CompareRow label={t("シンクロ率")} a={first.sync_rate} b={latest.sync_rate} unit="%" higherBetter />
+                  <CompareRow label={t("肩の回転")} a={first.shoulder_turn_deg} b={latest.shoulder_turn_deg} unit="°" higherBetter />
+                  <CompareRow label={t("軸ブレ")} a={swayOf(first)} b={swayOf(latest)} unit="cm" higherBetter={false} />
+                  <CompareRow label={t("悪癖の数")} a={first.faults?.length ?? 0} b={latest.faults?.length ?? 0} unit={t("件")} higherBetter={false} />
                 </div>
               </Card>
             )}
 
             {/* History list */}
             <Card>
-              <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>履歴</div>
+              <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>{t("履歴")}</div>
               <div className="space-y-2">
                 {swings.map((s) => (
                   <div key={s.id} className="flex items-center gap-3 text-sm">
@@ -139,7 +141,7 @@ export default function ProgressPage() {
                         {new Date(s.created_at).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                       </div>
                       <div className="truncate">
-                        {s.faults?.length ? s.faults[0].label : "悪癖なし 👍"}
+                        {s.faults?.length ? s.faults[0].label : t("悪癖なし 👍")}
                       </div>
                     </div>
                   </div>

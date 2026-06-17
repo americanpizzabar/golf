@@ -5,8 +5,10 @@ import Link from "next/link";
 import { PageHeader, Stat, LinkCard, Card } from "@/components/ui";
 import { fetchPros, getProfile, fetchSwings, fetchApproaches } from "@/lib/db";
 import type { Pro, Profile, Swing, ApproachSession } from "@/lib/types";
+import { useT } from "@/lib/i18n";
 
 export default function Home() {
+  const t = useT();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [pro, setPro] = useState<Pro | null>(null);
   const [swings, setSwings] = useState<Swing[]>([]);
@@ -40,8 +42,8 @@ export default function Home() {
         title="SwingSync ⛳"
         subtitle={
           profile?.nickname
-            ? `${profile.nickname}さん、今日も上達しよう`
-            : "AIゴルフ・スイング分析"
+            ? t("{name}さん、今日も上達しよう", { name: profile.nickname })
+            : t("AIゴルフ・スイング分析")
         }
       />
 
@@ -54,7 +56,7 @@ export default function Home() {
               style={{ background: pro.accent }}
             />
             <div className="text-xs" style={{ color: "var(--muted)" }}>
-              あなたの理想のプロ（骨格マッチ）
+              {t("あなたの理想のプロ（骨格マッチ）")}
             </div>
             <div className="mt-1 flex items-end justify-between">
               <div>
@@ -68,7 +70,7 @@ export default function Home() {
                 className="text-xs underline"
                 style={{ color: "var(--green)" }}
               >
-                体型を編集
+                {t("体型を編集")}
               </Link>
             </div>
           </Card>
@@ -84,9 +86,9 @@ export default function Home() {
               📏
             </div>
             <div>
-              <div className="font-semibold">まず体型を登録</div>
+              <div className="font-semibold">{t("まず体型を登録")}</div>
               <div className="text-xs" style={{ color: "var(--muted)" }}>
-                身長・腕の長さからあなたに近いプロを自動選定します
+                {t("身長・腕の長さからあなたに近いプロを自動選定します")}
               </div>
             </div>
             <div className="ml-auto text-xl" style={{ color: "var(--muted)" }}>
@@ -98,19 +100,19 @@ export default function Home() {
         {/* Quick stats */}
         <div className="grid grid-cols-3 gap-2">
           <Stat
-            label="シンクロ率"
+            label={t("シンクロ率")}
             value={latest?.sync_rate ?? "—"}
             unit={latest?.sync_rate ? "%" : ""}
             accent="var(--cyan)"
           />
           <Stat
-            label="寄せ率(1m)"
+            label={t("寄せ率(1m)")}
             value={apRate ?? "—"}
             unit={apRate !== null ? "%" : ""}
             accent="var(--green)"
           />
           <Stat
-            label="解析回数"
+            label={t("解析回数")}
             value={loading ? "…" : swings.length}
             accent="var(--amber)"
           />
@@ -119,7 +121,7 @@ export default function Home() {
         {latest && latest.faults?.length > 0 && (
           <Card>
             <div className="text-xs mb-1" style={{ color: "var(--muted)" }}>
-              直近スイングの一言診断
+              {t("直近スイングの一言診断")}
             </div>
             <div className="font-semibold">⚠️ {latest.faults[0].label}</div>
             <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>
@@ -133,85 +135,85 @@ export default function Home() {
           <LinkCard
             href="/swing"
             icon="🏌️"
-            title="スイングAI解析"
-            desc="カメラで骨格計測・プロとのズレを可視化"
+            title={t("スイングAI解析")}
+            desc={t("カメラで骨格計測・プロとのズレを可視化")}
             accent="#22d3ee"
           />
           <LinkCard
             href="/approach"
             icon="🎯"
-            title="アプローチ計測（ARターゲット）"
-            desc="状況別の寄せ成功率をデータ化"
+            title={t("アプローチ計測（ARターゲット）")}
+            desc={t("状況別の寄せ成功率をデータ化")}
             accent="#22c55e"
           />
           <LinkCard
             href="/tracer"
             icon="🎥"
-            title="AR弾道トレーサー"
-            desc="球筋を判定・弾道を描画＋クラブ分布図"
+            title={t("AR弾道トレーサー")}
+            desc={t("球筋を判定・弾道を描画＋クラブ分布図")}
             accent="#3b82f6"
           />
           <LinkCard
             href="/coach"
             icon="🧠"
-            title="AIコーチ"
-            desc="時間・球数に合わせた処方箋メニュー"
+            title={t("AIコーチ")}
+            desc={t("時間・球数に合わせた処方箋メニュー")}
             accent="#f59e0b"
           />
           <LinkCard
             href="/progress"
             icon="📈"
-            title="成長ログ & 1年後予測"
-            desc="スイングを並べて比較・タイムラプス"
+            title={t("成長ログ & 1年後予測")}
+            desc={t("スイングを並べて比較・タイムラプス")}
             accent="#8b5cf6"
           />
           <LinkCard
             href="/sync"
             icon="📡"
-            title="シンクロ撮影（2台同時）"
-            desc="2台を6桁コードで接続・正面×後方を同時録画"
+            title={t("シンクロ撮影（2台同時）")}
+            desc={t("2台を6桁コードで接続・正面×後方を同時録画")}
             accent="#14b8a6"
           />
           <LinkCard
             href="/cross"
             icon="🎬"
-            title="クロスアングル解析"
-            desc="正面×後方を打音で同期・2視点で真因を判定"
+            title={t("クロスアングル解析")}
+            desc={t("正面×後方を打音で同期・2視点で真因を判定")}
             accent="#ec4899"
           />
           <LinkCard
             href="/ghost"
             icon="👻"
-            title="ゴースト比較"
-            desc="ベストスイングと重ねて加速を可視化"
+            title={t("ゴースト比較")}
+            desc={t("ベストスイングと重ねて加速を可視化")}
             accent="#a78bfa"
           />
           <LinkCard
             href="/silhouette"
             icon="👤"
-            title="シースルー・シルエット"
-            desc="プロの輪郭と重ねてハミ出しを可視化"
+            title={t("シースルー・シルエット")}
+            desc={t("プロの輪郭と重ねてハミ出しを可視化")}
             accent="#f59e0b"
           />
           <LinkCard
             href="/match"
             icon="🤝"
-            title="一期一会ラウンド（対戦）"
-            desc="同伴者とスコア・寄せ率を競う"
+            title={t("一期一会ラウンド（対戦）")}
+            desc={t("同伴者とスコア・寄せ率を競う")}
             accent="#ef4444"
           />
           <LinkCard
             href="/home-drills"
             icon="🪞"
-            title="自宅ノンボール練習"
-            desc="鏡の前・1畳でできるメニュー"
+            title={t("自宅ノンボール練習")}
+            desc={t("鏡の前・1畳でできるメニュー")}
             accent="#06b6d4"
           />
           <LinkCard
             href="/conditions"
             icon="🌬️"
-            title="弾道エミュレーター"
-            desc="標高・気温・風で飛距離変化を予測"
+            title={t("弾道エミュレーター")}
+            desc={t("標高・気温・風で飛距離変化を予測")}
             accent="#0ea5e9"
           />
         </div>
@@ -220,7 +222,7 @@ export default function Home() {
           className="text-center text-[11px] pt-2 pb-4"
           style={{ color: "var(--muted)" }}
         >
-          骨格推定はブラウザ内（MediaPipe）で処理。映像は端末から送信されません。
+          {t("骨格推定はブラウザ内（MediaPipe）で処理。映像は端末から送信されません。")}
         </p>
       </div>
     </main>

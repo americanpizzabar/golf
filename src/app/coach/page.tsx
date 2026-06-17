@@ -6,8 +6,10 @@ import { PageHeader, Card } from "@/components/ui";
 import { generateMenu, youtubeSearch, LIE_LABELS, LIE_ORDER } from "@/lib/golf";
 import { fetchSwings, fetchApproaches, saveMenu, fetchMenus } from "@/lib/db";
 import type { Drill, Fault, LieType } from "@/lib/types";
+import { useT } from "@/lib/i18n";
 
 export default function CoachPage() {
+  const t = useT();
   const [minutes, setMinutes] = useState(60);
   const [balls, setBalls] = useState(100);
   const [mode, setMode] = useState<"range" | "home">("range");
@@ -81,33 +83,33 @@ export default function CoachPage() {
 
   return (
     <main>
-      <PageHeader title="AIコーチ" subtitle="今日の最適メニューを処方" back />
+      <PageHeader title={t("AIコーチ")} subtitle={t("今日の最適メニューを処方")} back />
       <div className="px-4 space-y-4">
         {/* Diagnosis summary */}
         <Card>
           <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-            あなたの直近の課題
+            {t("あなたの直近の課題")}
           </div>
           {!loaded ? (
-            <p className="text-sm" style={{ color: "var(--muted)" }}>読み込み中…</p>
+            <p className="text-sm" style={{ color: "var(--muted)" }}>{t("読み込み中…")}</p>
           ) : faults.length === 0 && weakLies.length === 0 ? (
             <p className="text-sm" style={{ color: "var(--muted)" }}>
-              まだ診断データがありません。
-              <Link href="/swing" style={{ color: "var(--green)" }}> スイング解析</Link>
-              や
-              <Link href="/approach" style={{ color: "var(--green)" }}> アプローチ計測</Link>
-              を行うと精度が上がります。
+              {t("まだ診断データがありません。")}
+              <Link href="/swing" style={{ color: "var(--green)" }}> {t("スイング解析")}</Link>
+              {t("や")}
+              <Link href="/approach" style={{ color: "var(--green)" }}> {t("アプローチ計測")}</Link>
+              {t("を行うと精度が上がります。")}
             </p>
           ) : (
             <div className="flex flex-wrap gap-1.5">
               {faults.map((f, i) => (
                 <span key={i} className="text-[11px] px-2 py-1 rounded-full" style={{ background: "var(--bg-soft)", color: "var(--amber)" }}>
-                  {f.label}
+                  {t(f.label)}
                 </span>
               ))}
               {weakLies.map((l) => (
                 <span key={l} className="text-[11px] px-2 py-1 rounded-full" style={{ background: "var(--bg-soft)", color: "var(--red)" }}>
-                  {LIE_LABELS[l]}が苦手
+                  {t("{lie}が苦手", { lie: t(LIE_LABELS[l]) })}
                 </span>
               ))}
             </div>
@@ -117,7 +119,7 @@ export default function CoachPage() {
         {/* Time / balls / mode */}
         <Card className="space-y-4">
           <div>
-            <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>練習モード</div>
+            <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>{t("練習モード")}</div>
             <div className="grid grid-cols-2 gap-2">
               {(["range", "home"] as const).map((m) => (
                 <button
@@ -130,7 +132,7 @@ export default function CoachPage() {
                     border: "1px solid var(--line)",
                   }}
                 >
-                  {m === "range" ? "🏌️ 練習場" : "🏠 自宅"}
+                  {m === "range" ? t("🏌️ 練習場") : t("🏠 自宅")}
                 </button>
               ))}
             </div>
@@ -138,7 +140,7 @@ export default function CoachPage() {
 
           <div>
             <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-              滞在時間（タイパ）: <b style={{ color: "var(--fg)" }}>{minutes}分</b>
+              {t("滞在時間（タイパ）:")} <b style={{ color: "var(--fg)" }}>{t("{n}分", { n: minutes })}</b>
             </div>
             <div className="grid grid-cols-4 gap-2">
               {[30, 60, 90, 120].map((m) => (
@@ -152,7 +154,7 @@ export default function CoachPage() {
                     border: "1px solid var(--line)",
                   }}
                 >
-                  {m}分
+                  {t("{n}分", { n: m })}
                 </button>
               ))}
             </div>
@@ -161,7 +163,7 @@ export default function CoachPage() {
           {mode === "range" && (
             <div>
               <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-                球数: <b style={{ color: "var(--fg)" }}>{balls}球</b>
+                {t("球数:")} <b style={{ color: "var(--fg)" }}>{t("{n}球", { n: balls })}</b>
               </div>
               <div className="grid grid-cols-4 gap-2">
                 {[50, 100, 150, 200].map((b) => (
@@ -175,7 +177,7 @@ export default function CoachPage() {
                       border: "1px solid var(--line)",
                     }}
                   >
-                    {b}球
+                    {t("{n}球", { n: b })}
                   </button>
                 ))}
               </div>
@@ -183,7 +185,7 @@ export default function CoachPage() {
           )}
 
           <button onClick={generate} className="btn btn-primary w-full py-3.5">
-            ✨ メニューを生成
+            {t("✨ メニューを生成")}
           </button>
         </Card>
 
@@ -192,9 +194,9 @@ export default function CoachPage() {
           <>
             <Card>
               <div className="flex items-center justify-between">
-                <div className="font-bold">本日のメニュー</div>
+                <div className="font-bold">{t("本日のメニュー")}</div>
                 <div className="text-xs" style={{ color: "var(--muted)" }}>
-                  約{totalMin}分{mode === "range" ? ` / ${totalBalls}球` : ""}
+                  {t("約{n}分", { n: totalMin })}{mode === "range" ? t(" / {n}球", { n: totalBalls }) : ""}
                 </div>
               </div>
             </Card>
@@ -207,16 +209,16 @@ export default function CoachPage() {
                       {i + 1}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="font-semibold">{d.title}</div>
+                      <div className="font-semibold">{t(d.title)}</div>
                       <div className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>
-                        {d.desc}
+                        {t(d.desc)}
                       </div>
                       <div className="text-xs mt-1.5 inline-block px-2 py-0.5 rounded-full" style={{ background: "var(--bg-soft)", color: "var(--cyan)" }}>
-                        💡 {d.cue}
+                        💡 {t(d.cue)}
                       </div>
                       <div className="flex items-center gap-3 mt-2 text-xs" style={{ color: "var(--muted)" }}>
-                        <span>⏱ {d.minutes}分</span>
-                        {d.balls ? <span>🏐 {d.balls}球</span> : null}
+                        <span>⏱ {t("{n}分", { n: d.minutes })}</span>
+                        {d.balls ? <span>🏐 {t("{n}球", { n: d.balls })}</span> : null}
                         <a
                           href={youtubeSearch(d.videoQuery)}
                           target="_blank"
@@ -224,7 +226,7 @@ export default function CoachPage() {
                           className="ml-auto"
                           style={{ color: "var(--green)" }}
                         >
-                          ▶ 処方箋動画
+                          {t("▶ 処方箋動画")}
                         </a>
                       </div>
                     </div>
@@ -234,7 +236,7 @@ export default function CoachPage() {
             </div>
 
             <button onClick={save} className="btn btn-primary w-full py-3.5">
-              {saved ? "保存しました ✓" : "このメニューを保存"}
+              {saved ? t("保存しました ✓") : t("このメニューを保存")}
             </button>
           </>
         )}

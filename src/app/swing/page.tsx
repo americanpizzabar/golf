@@ -9,6 +9,7 @@ import { analyzeSwing, detectFaults, matchPro, syncRate, compactFrames, type Swi
 import { ANGLE_LABEL, type ViewAngle } from "@/lib/ghost-sync";
 import { CLUBS, clubFactor } from "@/lib/golf";
 import { fetchPros, getProfile, saveSwing } from "@/lib/db";
+import { useT } from "@/lib/i18n";
 import type { Pro, Profile, Fault, SwingAngles } from "@/lib/types";
 
 type Stage = "idle" | "loading" | "ready" | "trim" | "analyzing" | "done";
@@ -28,6 +29,7 @@ interface Stamped {
 }
 
 export default function SwingPage() {
+  const t = useT();
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number>(0);
@@ -156,7 +158,7 @@ export default function SwingPage() {
     } catch (e) {
       console.error("pose model load failed", e);
       setModelState("error");
-      setErr("AI解析エンジンの読み込みに失敗しました。通信環境を確認して再試行してください。");
+      setErr(t("AI解析エンジンの読み込みに失敗しました。通信環境を確認して再試行してください。"));
       return null;
     }
   }
@@ -233,20 +235,20 @@ export default function SwingPage() {
 
   // 常時監視：アドレス（静止）→始動→インパクト→フィニッシュを自動検知し、
   // スイングシーンだけを切り出す。時間制限は一切なし。
-  function runDetector(pose: Frame, t: number) {
+  function runDetector(pose: Frame, now: number) {
     const prev = prevPoseRef.current;
     prevPoseRef.current = pose;
     if (!prev) return;
     const energy = motionEnergy(pose, prev);
-    if (energy < E_QUIET) lastQuietRef.current = t;
+    if (energy < E_QUIET) lastQuietRef.current = now;
 
     if (!swingActiveRef.current) {
       // Trigger only when a burst follows a recent quiet (address) period.
-      const wasRecentlyQuiet = lastQuietRef.current > 0 && t - lastQuietRef.current < 1500;
+      const wasRecentlyQuiet = lastQuietRef.current > 0 && now - lastQuietRef.current < 1500;
       if (energy > E_BURST && wasRecentlyQuiet) {
         swingActiveRef.current = true;
         windowStartRef.current = lastQuietRef.current - 300; // include address
-        peakTimeRef.current = t;
+        peakTimeRef.current = now;
         peakEnergyRef.current = energy;
         setWatch("スイングを検出！");
       } else if (wasRecentlyQuiet) {
@@ -257,10 +259,10 @@ export default function SwingPage() {
     } else {
       if (energy > peakEnergyRef.current) {
         peakEnergyRef.current = energy;
-        peakTimeRef.current = t;
+        peakTimeRef.current = now;
       }
-      const settled = energy < E_SETTLE && t - peakTimeRef.current > 300;
-      const tooLong = t - windowStartRef.current > 3500;
+      const settled = energy < E_SETTLE && now - peakTimeRef.current > 300;
+      const tooLong = now - windowStartRef.current > 3500;
       if (settled || tooLong) {
         swingActiveRef.current = false;
         const frames = bufferRef.current
@@ -284,18 +286,18 @@ export default function SwingPage() {
   function cameraErrorMessage(e: unknown): string {
     const name = (e as { name?: string })?.name;
     if (name === "NotAllowedError" || name === "SecurityError")
-      return "カメラの使用が許可されませんでした。ブラウザのアドレスバーからカメラを「許可」に変更してください。";
+      return t("カメラの使用が許可されませんでした。ブラウザのアドレスバーからカメラを「許可」に変更してください。");
     if (name === "NotFoundError" || name === "OverconstrainedError")
-      return "利用できるカメラが見つかりませんでした。動画アップロードをご利用ください。";
+      return t("利用できるカメラが見つかりませんでした。動画アップロードをご利用ください。");
     if (name === "NotReadableError")
-      return "カメラが他のアプリで使用中の可能性があります。他のアプリを閉じて再試行してください。";
-    return "カメラを起動できませんでした。権限を確認するか、動画アップロードをお試しください。";
+      return t("カメラが他のアプリで使用中の可能性があります。他のアプリを閉じて再試行してください。");
+    return t("カメラを起動できませんでした。権限を確認するか、動画アップロードをお試しください。");
   }
 
   async function startCamera(opts?: { facing?: "environment" | "user"; deviceId?: string }) {
     setErr("");
     if (!navigator.mediaDevices?.getUserMedia) {
-      setErr("このブラウザ/接続ではカメラを利用できません（HTTPS環境が必要です）。動画アップロードをご利用ください。");
+      setErr(t("このブラウザ/接続ではカメラを利用できません（HTTPS環境が必要です）。動画アップロードをご利用ください。"));
       return;
     }
     const want = opts?.facing ?? facing;
@@ -462,7 +464,7 @@ export default function SwingPage() {
       // be presented so it actually renders on mobile.
       setTimeout(() => seekPreview(0.03), 60);
     } catch (e) {
-      setErr("動画を読み込めませんでした。別の動画ファイルでお試しください。");
+      setErr(t("動画を読み込めませんでした。別の動画ファイルでお試しください。"));
       setStage("idle");
       console.error(e);
     }
@@ -715,13 +717,13 @@ export default function SwingPage() {
 
     const fps = range > 0 ? frames.length / range : 30;
     if (frames.length < 6) {
-      setErr("選択範囲で骨格を検出できませんでした。被写体（全身）がもう少し大きく映る動画か、明るい場所で撮影した動画でお試しください。");
+      setErr(t("選択範囲で骨格を検出できませんでした。被写体（全身）がもう少し大きく映る動画か、明るい場所で撮影した動画でお試しください。"));
       analyzingRef.current = false;
       stageRef.current = "trim";
       setStage("trim");
       return;
     }
-    setNotice(`選択範囲 ${start.toFixed(1)}〜${end.toFixed(1)}秒（${frames.length}コマ）を解析`);
+    setNotice(t("選択範囲 {start}〜{end}秒（{frames}コマ）を解析", { start: start.toFixed(1), end: end.toFixed(1), frames: frames.length }));
     finishAnalysis(frames, fps, "trim");
   }
 
@@ -742,8 +744,8 @@ export default function SwingPage() {
       if (!r.valid) {
         setErr(
           detected === 0
-            ? "骨格を検出できませんでした。全身（頭から足まで）がフレームに入るようカメラから2〜3m離れ、明るい場所で再撮影してください。"
-            : "スイングをうまく解析できませんでした。全身が映る位置で、もう一度ゆっくりスイングしてみてください。",
+            ? t("骨格を検出できませんでした。全身（頭から足まで）がフレームに入るようカメラから2〜3m離れ、明るい場所で再撮影してください。")
+            : t("スイングをうまく解析できませんでした。全身が映る位置で、もう一度ゆっくりスイングしてみてください。"),
         );
         // Re-arm the continuous detector / return to the trim screen.
         resetDetector();
@@ -767,7 +769,7 @@ export default function SwingPage() {
       setStage("done");
     } catch (e) {
       console.error("swing analysis failed", e);
-      setErr("解析中に問題が発生しました。もう一度お試しください。");
+      setErr(t("解析中に問題が発生しました。もう一度お試しください。"));
       resetDetector();
       stageRef.current = backStage;
       setStage(backStage);
@@ -810,21 +812,21 @@ export default function SwingPage() {
 
   return (
     <main>
-      <PageHeader title="スイングAI解析" subtitle="骨格をリアルタイム計測・プロと比較" back />
+      <PageHeader title={t("スイングAI解析")} subtitle={t("骨格をリアルタイム計測・プロと比較")} back />
 
       <div className="px-4 space-y-4">
         {!profile?.height_cm && (
           <Link href="/profile" className="card p-3 text-sm block">
-            ⚠️ 先に<span style={{ color: "var(--green)" }}>体型プロフィール</span>を登録すると、あなたに最適なプロと比較できます（未登録時は標準体型で比較）。
+            ⚠️ {t("先に")}<span style={{ color: "var(--green)" }}>{t("体型プロフィール")}</span>{t("を登録すると、あなたに最適なプロと比較できます（未登録時は標準体型で比較）。")}
           </Link>
         )}
 
         {showCamera && (
           <div className="flex items-center gap-2">
-            <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>使用クラブ</span>
+            <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>{t("使用クラブ")}</span>
             <select value={club} onChange={(e) => setClub(e.target.value)} className="flex-1 px-2 py-2 text-sm">
               {CLUBS.map((c) => (
-                <option key={c.id} value={c.id}>{c.label}</option>
+                <option key={c.id} value={c.id}>{t(c.label)}</option>
               ))}
             </select>
           </div>
@@ -857,7 +859,7 @@ export default function SwingPage() {
                   onClick={switchCamera}
                   className="absolute top-2 right-2 btn btn-ghost text-xs px-3 py-1.5"
                 >
-                  🔄 前後切替
+                  🔄 {t("前後切替")}
                 </button>
               )}
               {stage === "ready" && modelState === "ready" && watch && (autoDetect || manualRec) && (
@@ -872,7 +874,7 @@ export default function SwingPage() {
                     className="inline-block w-2 h-2 rounded-full"
                     style={{ background: swingHot ? "#fff" : "var(--green)" }}
                   />
-                  {watch}
+                  {t(watch)}
                 </div>
               )}
               {stage === "ready" && !isUpload && liveAngle && (
@@ -880,7 +882,7 @@ export default function SwingPage() {
                   className="absolute top-2 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-full text-[11px] font-bold"
                   style={{ background: "rgba(0,0,0,0.6)", color: "#7dd3fc" }}
                 >
-                  📐 {ANGLE_LABEL[liveAngle]}（自動）
+                  📐 {t(ANGLE_LABEL[liveAngle])}{t("（自動）")}
                 </div>
               )}
               {stage === "idle" && (
@@ -888,14 +890,14 @@ export default function SwingPage() {
                   <div>
                     <div className="text-4xl mb-2">🏌️</div>
                     <p className="text-sm" style={{ color: "var(--muted)" }}>
-                      全身が映るようにスマホを縦に置き、<br />正面または後方から撮影します
+                      {t("全身が映るようにスマホを縦に置き、")}<br />{t("正面または後方から撮影します")}
                     </p>
                   </div>
                 </div>
               )}
               {stage === "loading" && (
                 <div className="absolute inset-0 grid place-items-center">
-                  <Spinner label="カメラを起動中…" />
+                  <Spinner label={t("カメラを起動中…")} />
                 </div>
               )}
               {modelState === "loading" && stage !== "loading" && stage !== "idle" && (
@@ -904,13 +906,13 @@ export default function SwingPage() {
                   style={{ background: "rgba(0,0,0,0.65)", color: "#fff" }}
                 >
                   <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  AI解析エンジン準備中…
+                  {t("AI解析エンジン準備中…")}
                 </div>
               )}
               {stage === "analyzing" && (
                 <div className="absolute inset-0 grid place-items-center bg-black/40">
                   <div className="text-center">
-                    <Spinner label={scanPct > 0 ? `スキャン中… ${scanPct}%` : "スイングを解析中…"} />
+                    <Spinner label={scanPct > 0 ? t("スキャン中… {scanPct}%", { scanPct }) : t("スイングを解析中…")} />
                   </div>
                 </div>
               )}
@@ -923,10 +925,10 @@ export default function SwingPage() {
               <Card>
                 <div className="flex items-center justify-between mb-2">
                   <div className="text-xs" style={{ color: "var(--muted)" }}>
-                    拡大・縮小（ピンチ操作も可）— 被写体が小さいときに寄せると精度が上がります
+                    {t("拡大・縮小（ピンチ操作も可）— 被写体が小さいときに寄せると精度が上がります")}
                   </div>
                   <button onClick={resetZoom} className="text-[11px] underline" style={{ color: "var(--green)" }}>
-                    リセット
+                    {t("リセット")}
                   </button>
                 </div>
                 <div className="flex items-center gap-2">
@@ -957,20 +959,20 @@ export default function SwingPage() {
                 </div>
                 {uZoom > 1 && (
                   <div className="text-[11px] mt-1.5" style={{ color: "var(--muted)" }}>
-                    1本指ドラッグで表示位置を移動できます。この拡大範囲がそのまま解析されます。
+                    {t("1本指ドラッグで表示位置を移動できます。この拡大範囲がそのまま解析されます。")}
                   </div>
                 )}
               </Card>
               <Card>
                 <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-                  解析するスイングの範囲を指定（不要な素振り・歩行を除外すると精度が上がります）
+                  {t("解析するスイングの範囲を指定（不要な素振り・歩行を除外すると精度が上がります）")}
                 </div>
                 <div className="space-y-3">
                   <div>
                     <div className="flex justify-between text-[11px] mb-1" style={{ color: "var(--muted)" }}>
-                      <span>開始: {trimStart.toFixed(1)}秒</span>
+                      <span>{t("開始: {sec}秒", { sec: trimStart.toFixed(1) })}</span>
                       <button onClick={() => seekPreview(trimStart)} className="underline" style={{ color: "var(--green)" }}>
-                        この位置を表示
+                        {t("この位置を表示")}
                       </button>
                     </div>
                     <input
@@ -989,9 +991,9 @@ export default function SwingPage() {
                   </div>
                   <div>
                     <div className="flex justify-between text-[11px] mb-1" style={{ color: "var(--muted)" }}>
-                      <span>終了: {trimEnd.toFixed(1)}秒</span>
+                      <span>{t("終了: {sec}秒", { sec: trimEnd.toFixed(1) })}</span>
                       <button onClick={() => seekPreview(trimEnd)} className="underline" style={{ color: "var(--green)" }}>
-                        この位置を表示
+                        {t("この位置を表示")}
                       </button>
                     </div>
                     <input
@@ -1009,17 +1011,17 @@ export default function SwingPage() {
                     />
                   </div>
                   <div className="text-[11px]" style={{ color: "var(--muted)" }}>
-                    選択範囲 {(trimEnd - trimStart).toFixed(1)}秒（アドレス〜フィニッシュが収まる長さが目安）
+                    {t("選択範囲 {sec}秒（アドレス〜フィニッシュが収まる長さが目安）", { sec: (trimEnd - trimStart).toFixed(1) })}
                   </div>
                 </div>
               </Card>
               <div className="grid grid-cols-2 gap-2">
                 <label className="btn btn-ghost py-3 text-center cursor-pointer">
-                  別の動画
+                  {t("別の動画")}
                   <input type="file" accept="video/*" className="hidden" onChange={onFile} />
                 </label>
                 <button onClick={scanRange} className="btn btn-primary py-3">
-                  ✂ この範囲を解析
+                  ✂ {t("この範囲を解析")}
                 </button>
               </div>
             </div>
@@ -1030,7 +1032,7 @@ export default function SwingPage() {
             <div className="mt-3 space-y-2">
               {devices.length > 1 && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>レンズ</span>
+                  <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>{t("レンズ")}</span>
                   <select
                     value={deviceId}
                     onChange={(e) => startCamera({ deviceId: e.target.value })}
@@ -1038,7 +1040,7 @@ export default function SwingPage() {
                   >
                     {backLenses.map((d, i) => (
                       <option key={d.deviceId} value={d.deviceId}>
-                        {d.label || `カメラ ${i + 1}`}
+                        {d.label || t("カメラ {n}", { n: i + 1 })}
                       </option>
                     ))}
                   </select>
@@ -1047,7 +1049,7 @@ export default function SwingPage() {
               {zoomCaps && (
                 <div className="flex items-center gap-2">
                   <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>
-                    {zoomCaps.min < 1 ? "広角" : "ズーム"}
+                    {zoomCaps.min < 1 ? t("広角") : t("ズーム")}
                   </span>
                   <button
                     onClick={() => applyZoom(Math.max(zoomCaps.min, Math.round((zoom - (zoomCaps.step > 0.2 ? zoomCaps.step : 0.2)) * 10) / 10))}
@@ -1092,10 +1094,10 @@ export default function SwingPage() {
           {stage === "idle" || stage === "loading" ? (
             <div className="grid grid-cols-2 gap-2 mt-3">
               <button onClick={() => startCamera()} className="btn btn-primary py-3">
-                📷 カメラで撮影
+                📷 {t("カメラで撮影")}
               </button>
               <label className="btn btn-ghost py-3 text-center cursor-pointer">
-                🎞 動画を選択
+                🎞 {t("動画を選択")}
                 <input type="file" accept="video/*" className="hidden" onChange={onFile} />
               </label>
             </div>
@@ -1103,19 +1105,19 @@ export default function SwingPage() {
             <div className="mt-3 space-y-2">
               {modelState === "error" ? (
                 <button onClick={() => ensureModel()} className="btn btn-primary py-3 w-full">
-                  ↻ AIエンジンを再読み込み
+                  ↻ {t("AIエンジンを再読み込み")}
                 </button>
               ) : modelState !== "ready" ? (
                 <div className="text-center text-sm py-3" style={{ color: "var(--muted)" }}>
-                  AI解析エンジンを準備中…
+                  {t("AI解析エンジンを準備中…")}
                 </div>
               ) : (
                 <>
                   <div className="card px-3 py-2.5 flex items-center justify-between">
                     <div>
-                      <div className="text-sm font-semibold">自動スイング検出</div>
+                      <div className="text-sm font-semibold">{t("自動スイング検出")}</div>
                       <div className="text-[11px]" style={{ color: "var(--muted)" }}>
-                        時間制限なし。構えてからゆっくり打ってOK
+                        {t("時間制限なし。構えてからゆっくり打ってOK")}
                       </div>
                     </div>
                     <button
@@ -1140,11 +1142,11 @@ export default function SwingPage() {
                         className="btn py-3.5 w-full font-bold"
                         style={{ background: "var(--red)", color: "#fff" }}
                       >
-                        ■ 終了して解析
+                        ■ {t("終了して解析")}
                       </button>
                     ) : (
                       <button onClick={startManual} className="btn btn-primary py-3.5 w-full">
-                        ● 検知開始（手動）
+                        ● {t("検知開始（手動）")}
                       </button>
                     ))}
                 </>
@@ -1196,6 +1198,7 @@ function Results({
   onSave: () => void;
   onRetry: () => void;
 }) {
+  const t = useT();
   const phases: [string, string][] = [
     ["address", "アドレス"],
     ["top", "トップ"],
@@ -1208,7 +1211,7 @@ function Results({
       {/* Sync gauge */}
       <Card className="text-center">
         <div className="text-xs" style={{ color: "var(--muted)" }}>
-          {pro ? `${pro.name} とのシンクロ率` : "スイング完成度"}
+          {pro ? t("{name} とのシンクロ率", { name: pro.name }) : t("スイング完成度")}
         </div>
         <div className="text-5xl font-extrabold mt-1" style={{ color: "var(--cyan)" }}>
           {sync}
@@ -1222,11 +1225,11 @@ function Results({
       {/* 3D wireframe phases */}
       <Card>
         <div className="text-xs mb-3" style={{ color: "var(--muted)" }}>
-          3Dワイヤーフレーム（4ポジション）
+          {t("3Dワイヤーフレーム（4ポジション）")}
         </div>
         <div className="grid grid-cols-4 gap-2">
           {phases.map(([key, label]) => (
-            <PhaseFigure key={key} frame={phaseFrames[key] ?? null} label={label} size={72} />
+            <PhaseFigure key={key} frame={phaseFrames[key] ?? null} label={t(label)} size={72} />
           ))}
         </div>
       </Card>
@@ -1235,11 +1238,11 @@ function Results({
       {pro && (
         <Card>
           <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-            スイングプレーン比較
+            {t("スイングプレーン比較")}
           </div>
           <PlaneCompare user={result.swingPlane} proDeg={pro.swing_plane_deg} accent={pro.accent} />
           <div className="grid grid-cols-2 gap-2 mt-3 text-center">
-            <Metric label="あなた" value={`${result.swingPlane}°`} color="var(--cyan)" />
+            <Metric label={t("あなた")} value={`${result.swingPlane}°`} color="var(--cyan)" />
             <Metric label={pro.name} value={`${pro.swing_plane_deg}°`} color={pro.accent} />
           </div>
         </Card>
@@ -1249,23 +1252,23 @@ function Results({
       {result.headSpeed > 0 && (
         <Card>
           <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-            バーチャル・ヘッドスピード（骨格＋映像から推定）
+            {t("バーチャル・ヘッドスピード（骨格＋映像から推定）")}
           </div>
           <div className="grid grid-cols-3 gap-2 text-center">
             <div className="rounded-xl py-2" style={{ background: "var(--bg-soft)" }}>
-              <div className="text-[11px]" style={{ color: "var(--muted)" }}>推定ヘッドスピード</div>
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>{t("推定ヘッドスピード")}</div>
               <div className="font-bold text-xl" style={{ color: "var(--cyan)" }}>
                 {result.headSpeed}<span className="text-xs">m/s</span>
               </div>
             </div>
             <div className="rounded-xl py-2" style={{ background: "var(--bg-soft)" }}>
-              <div className="text-[11px]" style={{ color: "var(--muted)" }}>手元スピード</div>
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>{t("手元スピード")}</div>
               <div className="font-bold text-xl">
                 {result.handSpeed}<span className="text-xs">m/s</span>
               </div>
             </div>
             <div className="rounded-xl py-2" style={{ background: "var(--bg-soft)" }}>
-              <div className="text-[11px]" style={{ color: "var(--muted)" }}>効率（タメ）</div>
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>{t("効率（タメ）")}</div>
               <div
                 className="font-bold text-xl"
                 style={{ color: result.efficiency >= 60 ? "var(--green)" : "var(--amber)" }}
@@ -1276,9 +1279,9 @@ function Results({
           </div>
           <p className="text-[11px] mt-2" style={{ color: "var(--muted)" }}>
             {result.efficiency >= 60
-              ? "タメが解けて効率よく加速できています（手元の減速→ヘッドが走る）。"
-              : "手元が走り続け＝手打ち傾向。下半身リードでタメを保ちましょう。"}
-            {" "}※ クラブ非検出のため映像と骨格からの推定値です。
+              ? t("タメが解けて効率よく加速できています（手元の減速→ヘッドが走る）。")
+              : t("手元が走り続け＝手打ち傾向。下半身リードでタメを保ちましょう。")}
+            {" "}{t("※ クラブ非検出のため映像と骨格からの推定値です。")}
           </p>
         </Card>
       )}
@@ -1286,23 +1289,23 @@ function Results({
       {/* Metrics grid */}
       <Card>
         <div className="grid grid-cols-2 gap-3 text-sm">
-          <KV k="肩の回転 (トップ)" v={`${result.shoulderTurn}°`} ref_={pro?.shoulder_turn_deg} unit="°" />
-          <KV k="腰の回転 (トップ)" v={`${result.hipTurn}°`} ref_={pro?.hip_turn_deg} unit="°" />
-          <KV k="前傾(背骨)角" v={`${result.spineTilt}°`} ref_={pro?.spine_tilt_deg} unit="°" />
-          <KV k="テンポ比" v={`${result.tempoRatio}`} ref_={pro?.tempo_ratio} unit="" />
-          <KV k="軸の横ブレ" v={`${result.swayCm}cm`} />
-          <KV k="リード腕(インパクト)" v={`${result.leadArmImpact}°`} />
+          <KV k={t("肩の回転 (トップ)")} v={`${result.shoulderTurn}°`} ref_={pro?.shoulder_turn_deg} unit="°" />
+          <KV k={t("腰の回転 (トップ)")} v={`${result.hipTurn}°`} ref_={pro?.hip_turn_deg} unit="°" />
+          <KV k={t("前傾(背骨)角")} v={`${result.spineTilt}°`} ref_={pro?.spine_tilt_deg} unit="°" />
+          <KV k={t("テンポ比")} v={`${result.tempoRatio}`} ref_={pro?.tempo_ratio} unit="" />
+          <KV k={t("軸の横ブレ")} v={`${result.swayCm}cm`} />
+          <KV k={t("リード腕(インパクト)")} v={`${result.leadArmImpact}°`} />
         </div>
       </Card>
 
       {/* Faults */}
       <Card>
         <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-          一言原因究明（{faults.length}件）
+          {t("一言原因究明（{n}件）", { n: faults.length })}
         </div>
         {faults.length === 0 ? (
           <p className="text-sm" style={{ color: "var(--green)" }}>
-            ✓ 大きな悪癖は検出されませんでした。ナイススイング！
+            ✓ {t("大きな悪癖は検出されませんでした。ナイススイング！")}
           </p>
         ) : (
           <div className="space-y-2">
@@ -1328,10 +1331,10 @@ function Results({
       {result.rootCause.length > 1 && (
         <Card>
           <div className="text-xs mb-1" style={{ color: "var(--muted)" }}>
-            🔎 リバース・エンジニアリング診断（根本原因の巻き戻し）
+            🔎 {t("リバース・エンジニアリング診断（根本原因の巻き戻し）")}
           </div>
           <p className="text-[11px] mb-3" style={{ color: "var(--muted)" }}>
-            結果から時間を遡り、悪癖の引き金になった最初の動きを特定します。
+            {t("結果から時間を遡り、悪癖の引き金になった最初の動きを特定します。")}
           </p>
           <div className="space-y-0">
             {result.rootCause.map((s, i) => (
@@ -1348,8 +1351,8 @@ function Results({
                 <div className="pb-3">
                   <div className="text-[11px]" style={{ color: "var(--muted)" }}>
                     {s.phase}
-                    {s.tMs !== 0 && `（インパクト${s.tMs}ms）`}
-                    {i === result.rootCause.length - 1 && " ← 根本原因"}
+                    {s.tMs !== 0 && t("（インパクト{tMs}ms）", { tMs: s.tMs })}
+                    {i === result.rootCause.length - 1 && t(" ← 根本原因")}
                   </div>
                   <div className="text-sm font-semibold">{s.label}</div>
                   <div className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>
@@ -1364,15 +1367,15 @@ function Results({
 
       <div className="grid grid-cols-2 gap-2">
         <button onClick={onRetry} className="btn btn-ghost py-3">
-          もう一度
+          {t("もう一度")}
         </button>
         <button onClick={onSave} className="btn btn-primary py-3">
-          {saved ? "保存しました ✓" : "記録を保存"}
+          {saved ? t("保存しました ✓") : t("記録を保存")}
         </button>
       </div>
       {faults.length > 0 && (
         <Link href="/coach" className="btn btn-ghost py-3 block text-center">
-          🧠 この診断から練習メニューを作る
+          🧠 {t("この診断から練習メニューを作る")}
         </Link>
       )}
     </>
@@ -1393,6 +1396,7 @@ function Metric({ label, value, color }: { label: string; value: string; color: 
 }
 
 function KV({ k, v, ref_, unit }: { k: string; v: string; ref_?: number; unit?: string }) {
+  const t = useT();
   return (
     <div>
       <div className="text-[11px]" style={{ color: "var(--muted)" }}>
@@ -1402,7 +1406,7 @@ function KV({ k, v, ref_, unit }: { k: string; v: string; ref_?: number; unit?: 
         {v}
         {ref_ != null && (
           <span className="text-[11px] ml-1" style={{ color: "var(--muted)" }}>
-            / 理想 {ref_}
+            / {t("理想")} {ref_}
             {unit}
           </span>
         )}

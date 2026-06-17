@@ -8,6 +8,7 @@ import { extractClip, type Clip } from "@/lib/clip";
 import { crossAnalyze, type CrossResult } from "@/lib/cross-angle";
 import { TwinPlayer, CrossReport, SyncBadge } from "@/components/CrossPlayer";
 import { CrossHistory } from "@/components/CrossHistory";
+import { useT } from "@/lib/i18n";
 
 type Slot = "front" | "dtl";
 type Stage = "idle" | "processing" | "ready";
@@ -15,6 +16,7 @@ type Stage = "idle" | "processing" | "ready";
 const SLOT_LABEL: Record<Slot, string> = { front: "正面", dtl: "後方(DTL)" };
 
 export default function CrossPage() {
+  const t = useT();
   const [files, setFiles] = useState<{ front?: File; dtl?: File }>({});
   const [clips, setClips] = useState<{ front?: Clip; dtl?: Clip }>({});
   const [stage, setStage] = useState<Stage>("idle");
@@ -60,16 +62,16 @@ export default function CrossPage() {
     setResult(null);
     try {
       const model = await getPoseLandmarker();
-      setPhase("正面動画を解析中…（打音を検出しています）");
+      setPhase(t("正面動画を解析中…（打音を検出しています）"));
       setPct(0);
       const front = await extractClip(files.front, model, leftHanded, setPct);
-      setPhase("後方動画を解析中…（骨格を抽出しています）");
+      setPhase(t("後方動画を解析中…（骨格を抽出しています）"));
       setPct(0);
       const dtl = await extractClip(files.dtl, model, leftHanded, setPct);
 
       if (front.frames.length < 5 || dtl.frames.length < 5) {
         setErr(
-          "どちらかの動画で骨格を十分に検出できませんでした。全身が大きく・明るく映った動画でお試しください。",
+          t("どちらかの動画で骨格を十分に検出できませんでした。全身が大きく・明るく映った動画でお試しください。"),
         );
         URL.revokeObjectURL(front.url);
         URL.revokeObjectURL(dtl.url);
@@ -84,7 +86,7 @@ export default function CrossPage() {
       setStage("ready");
     } catch (e) {
       console.error(e);
-      setErr("解析中にエラーが発生しました。動画ファイルを変えてお試しください。");
+      setErr(t("解析中にエラーが発生しました。動画ファイルを変えてお試しください。"));
       setStage("idle");
     }
   };
@@ -102,18 +104,17 @@ export default function CrossPage() {
   return (
     <main>
       <PageHeader
-        title="クロスアングル解析"
-        subtitle="正面×後方を打音で完全同期・2視点で真因を判定"
+        title={t("クロスアングル解析")}
+        subtitle={t("正面×後方を打音で完全同期・2視点で真因を判定")}
         back
       />
       <div className="px-4 space-y-4 pb-8">
         {stage === "idle" && (
           <>
             <Card>
-              <div className="text-sm font-semibold mb-1">2つの視点の動画を読み込み</div>
+              <div className="text-sm font-semibold mb-1">{t("2つの視点の動画を読み込み")}</div>
               <p className="text-[12px] mb-3" style={{ color: "var(--muted)" }}>
-                同じスイングを「正面」と「後方(DTL)」から撮った2本を選んでください。打球音(打音)の
-                波形を照合して、2本を1コマのズレもなく自動同期します。
+                {t("同じスイングを「正面」と「後方(DTL)」から撮った2本を選んでください。打球音(打音)の波形を照合して、2本を1コマのズレもなく自動同期します。")}
               </p>
               <div className="grid grid-cols-2 gap-3">
                 {(["front", "dtl"] as Slot[]).map((slot) => (
@@ -123,12 +124,12 @@ export default function CrossPage() {
                     style={{ borderStyle: files[slot] ? "solid" : "dashed", minHeight: 96 }}
                   >
                     <span className="text-2xl">{slot === "front" ? "🧍" : "🏌️"}</span>
-                    <span className="text-xs font-semibold mt-1">{SLOT_LABEL[slot]}</span>
+                    <span className="text-xs font-semibold mt-1">{t(SLOT_LABEL[slot])}</span>
                     <span
                       className="text-[11px] mt-0.5 truncate max-w-full"
                       style={{ color: files[slot] ? "var(--green)" : "var(--muted)" }}
                     >
-                      {files[slot] ? "✓ 選択済み" : "タップして選択"}
+                      {files[slot] ? t("✓ 選択済み") : t("タップして選択")}
                     </span>
                     <input type="file" accept="video/*" className="hidden" onChange={onPick(slot)} />
                   </label>
@@ -143,7 +144,7 @@ export default function CrossPage() {
                   color: files.front && files.dtl ? "#03260f" : "var(--muted)",
                 }}
               >
-                同期して解析する
+                {t("同期して解析する")}
               </button>
               {err && (
                 <div className="text-xs mt-2" style={{ color: "var(--red)" }}>
@@ -153,13 +154,11 @@ export default function CrossPage() {
             </Card>
             <Card>
               <div className="text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
-                💡 同期のコツ：両方の動画に「インパクトの打音」がはっきり入っていると精度が上がります。
-                音声が無い動画でも、骨格から推定した最速点(インパクト)で自動同期します。
-                2台同時撮影には{" "}
+                {t("💡 同期のコツ：両方の動画に「インパクトの打音」がはっきり入っていると精度が上がります。音声が無い動画でも、骨格から推定した最速点(インパクト)で自動同期します。2台同時撮影には")}{" "}
                 <a href="/sync" style={{ color: "var(--green)" }}>
-                  シンクロ撮影
+                  {t("シンクロ撮影")}
                 </a>{" "}
-                が便利です。解析はすべて端末内(MediaPipe)で行われます。
+                {t("が便利です。解析はすべて端末内(MediaPipe)で行われます。")}
               </div>
             </Card>
             <CrossHistory />
@@ -184,7 +183,7 @@ export default function CrossPage() {
             <TwinPlayer front={clips.front} dtl={clips.dtl} leftHanded={leftHanded} />
             <CrossReport result={result} />
             <button onClick={reset} className="btn btn-ghost w-full py-2.5 text-sm">
-              別の動画で解析する
+              {t("別の動画で解析する")}
             </button>
           </>
         )}

@@ -7,6 +7,7 @@ import { generateModelSwing, generateModelSwingDTL } from "@/lib/model-swing";
 import { interpFrame, ANGLE_LABEL, type ViewAngle } from "@/lib/ghost-sync";
 import { matchPro } from "@/lib/swing";
 import { fetchPros, getProfile } from "@/lib/db";
+import { useT } from "@/lib/i18n";
 import type { MPMask } from "@mediapipe/tasks-vision";
 
 type Pt = { x: number; y: number };
@@ -21,6 +22,7 @@ const BONES: [number, number][] = [
 ];
 
 export default function SilhouettePage() {
+  const t = useT();
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -73,7 +75,7 @@ export default function SilhouettePage() {
 
   async function start() {
     if (!navigator.mediaDevices?.getUserMedia) {
-      setErr("このブラウザ/接続ではカメラを利用できません（HTTPSが必要です）。");
+      setErr(t("このブラウザ/接続ではカメラを利用できません（HTTPSが必要です）。"));
       return;
     }
     let s: MediaStream | null = null;
@@ -83,7 +85,7 @@ export default function SilhouettePage() {
       try {
         s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       } catch {
-        setErr("カメラを起動できませんでした。");
+        setErr(t("カメラを起動できませんでした。"));
         return;
       }
     }
@@ -97,7 +99,7 @@ export default function SilhouettePage() {
     try {
       model = await getSegLandmarker();
     } catch {
-      setErr("セグメンテーション・エンジンの読み込みに失敗しました。");
+      setErr(t("セグメンテーション・エンジンの読み込みに失敗しました。"));
       return;
     }
     setCamOn(true);
@@ -265,7 +267,7 @@ export default function SilhouettePage() {
 
   return (
     <main>
-      <PageHeader title="シースルー・シルエット" subtitle="プロの輪郭と重ねてズレを可視化（β）" back />
+      <PageHeader title={t("シースルー・シルエット")} subtitle={t("プロの輪郭と重ねてズレを可視化（β）")} back />
       <div className="px-4 space-y-4">
         <Card className="p-0 overflow-hidden">
           <div className="relative bg-black aspect-[3/4]">
@@ -276,8 +278,8 @@ export default function SilhouettePage() {
                 <div>
                   <div className="text-4xl mb-2">👤</div>
                   <p className="text-sm" style={{ color: "var(--muted)" }}>
-                    全身が映るようスマホを立て、2〜3m離れて構えます。<br />
-                    自分の輪郭にプロのシルエットを重ねて表示します。
+                    {t("全身が映るようスマホを立て、2〜3m離れて構えます。")}<br />
+                    {t("自分の輪郭にプロのシルエットを重ねて表示します。")}
                   </p>
                 </div>
               </div>
@@ -285,11 +287,11 @@ export default function SilhouettePage() {
             {camOn && (
               <div className="absolute top-2 left-2 px-3 py-1 rounded-full text-xs font-bold"
                 style={{ background: "rgba(0,0,0,0.6)", color: "#7dd3fc" }}>
-                📐 {ANGLE_LABEL[angle]}（自動）
+                📐 {t(ANGLE_LABEL[angle])}{t("（自動）")}
               </div>
             )}
             {camOn && (
-              <button onClick={stop} className="absolute top-2 right-2 btn btn-ghost text-xs px-3 py-1.5">停止</button>
+              <button onClick={stop} className="absolute top-2 right-2 btn btn-ghost text-xs px-3 py-1.5">{t("停止")}</button>
             )}
           </div>
         </Card>
@@ -297,13 +299,13 @@ export default function SilhouettePage() {
         {/* Legend */}
         <Card>
           <div className="grid grid-cols-3 gap-2 text-center text-[11px]">
-            <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#22d3ee" }} /> 自分（骨格/一致）</div>
-            <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#f43f5e" }} /> ハミ出し</div>
-            <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#facc50" }} /> プロのシルエット</div>
+            <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#22d3ee" }} /> {t("自分（骨格/一致）")}</div>
+            <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#f43f5e" }} /> {t("ハミ出し")}</div>
+            <div><span className="inline-block w-3 h-3 rounded-sm align-middle" style={{ background: "#facc50" }} /> {t("プロのシルエット")}</div>
           </div>
           {camOn && maskOk === false && (
             <div className="text-[11px] mt-2" style={{ color: "var(--amber)" }}>
-              ※ この端末では輪郭（セグメンテーション）抽出が無効のため、骨格＋プロのシルエットで表示しています。
+              {t("※ この端末では輪郭（セグメンテーション）抽出が無効のため、骨格＋プロのシルエットで表示しています。")}
             </div>
           )}
         </Card>
@@ -311,19 +313,19 @@ export default function SilhouettePage() {
         {err && <Card className="text-sm" style={{ color: "#fca5a5" }}>{err}</Card>}
 
         {!camOn ? (
-          <button onClick={start} className="btn btn-primary w-full py-3.5">📷 カメラを起動して重ね合わせ</button>
+          <button onClick={start} className="btn btn-primary w-full py-3.5">{t("📷 カメラを起動して重ね合わせ")}</button>
         ) : (
           <Card className="space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs" style={{ color: "var(--muted)" }}>
-                お手本：<b style={{ color: "var(--fg)" }}>{proName || "—"}</b>（{ANGLE_LABEL[angle]}）
+                {t("お手本：")}<b style={{ color: "var(--fg)" }}>{proName || t("—")}</b>{t("（{angle}）", { angle: t(ANGLE_LABEL[angle]) })}
               </span>
               <button onClick={() => setPlaying((v) => !v)} className="btn btn-ghost text-xs px-3 py-1.5">
-                {playing ? "⏸ 自動" : "▶ 自動再生"}
+                {playing ? t("⏸ 自動") : t("▶ 自動再生")}
               </button>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-[11px] shrink-0" style={{ color: "var(--muted)" }}>局面</span>
+              <span className="text-[11px] shrink-0" style={{ color: "var(--muted)" }}>{t("局面")}</span>
               <input
                 type="range" min={0} max={1} step={0.002} value={phase}
                 onChange={(e) => { setPlaying(false); phaseRef.current = Number(e.target.value); setPhase(phaseRef.current); }}
@@ -331,15 +333,13 @@ export default function SilhouettePage() {
               />
             </div>
             <p className="text-[11px]" style={{ color: "var(--muted)" }}>
-              スライダーでプロの局面（アドレス〜フィニッシュ）を動かし、同じ姿勢を取ってみてください。
-              赤い部分はプロの輪郭から「ハミ出した」体の部分です。
+              {t("スライダーでプロの局面（アドレス〜フィニッシュ）を動かし、同じ姿勢を取ってみてください。 赤い部分はプロの輪郭から「ハミ出した」体の部分です。")}
             </p>
           </Card>
         )}
 
         <p className="text-[10px] leading-relaxed px-1" style={{ color: "var(--muted)" }}>
-          ※ 自分の輪郭はカメラのAI人物セグメンテーションで抽出。プロのシルエットは、あなたと同じ体型のプロ
-          （{proName || "自動選定"}）の骨格を肉付けし、あなたの胴体に合わせて重ねた近似モデルです（実スキャンではないためβ）。
+          {t("※ 自分の輪郭はカメラのAI人物セグメンテーションで抽出。プロのシルエットは、あなたと同じ体型のプロ（{name}）の骨格を肉付けし、あなたの胴体に合わせて重ねた近似モデルです（実スキャンではないためβ）。", { name: proName || t("自動選定") })}
         </p>
       </div>
     </main>
