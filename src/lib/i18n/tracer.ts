@@ -14,6 +14,8 @@ export const d: Record<string, string> = {
     "On your shot, the flight is physically verified and drawn after about 1.5s (outdoor OK).",
   "● 弾道を物理検証中…": "● Verifying flight…",
   "○ 監視中 — 打ってください": "○ Watching — go ahead and hit",
+  "⚠ 弾道を検出できず。ボールが大きく映る位置から撮ってみてください":
+    "⚠ No flight detected. Try filming from a spot where the ball appears larger",
   "🎙 打音同期 ON": "🎙 Impact-sound sync ON",
   "🎙 打音OFF（映像検知）": "🎙 Impact sound OFF (visual detection)",
   "停止": "Stop",

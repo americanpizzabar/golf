@@ -41,7 +41,7 @@ export function findMovingBlobs(
   prev: Uint8ClampedArray,
   w: number,
   h: number,
-  cap = 16,
+  cap = 24,
 ): RawBlob[] {
   const n = w * h;
   const mask = new Uint8Array(n);
@@ -50,11 +50,11 @@ export function findMovingBlobs(
       Math.abs(cur[i] - prev[i]) +
       Math.abs(cur[i + 1] - prev[i + 1]) +
       Math.abs(cur[i + 2] - prev[i + 2]);
-    if (d > 60) mask[p] = 1;
+    if (d > 42) mask[p] = 1;
   }
 
   const BALL_MIN = 2;
-  const BALL_MAX = 150;
+  const BALL_MAX = Math.max(150, (n / 128) | 0); // scales with detection resolution
   const blobs: (RawBlob & { score: number })[] = [];
   const stack = new Int32Array(n);
   const seen = new Uint8Array(n);
@@ -81,18 +81,26 @@ export function findMovingBlobs(
       if (px > maxX) maxX = px;
       if (py < minY) minY = py;
       if (py > maxY) maxY = py;
-      if (px > 0 && mask[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack[sp++] = p - 1; }
-      if (px < w - 1 && mask[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack[sp++] = p + 1; }
-      if (py > 0 && mask[p - w] && !seen[p - w]) { seen[p - w] = 1; stack[sp++] = p - w; }
-      if (py < h - 1 && mask[p + w] && !seen[p + w]) { seen[p + w] = 1; stack[sp++] = p + w; }
+      // 8-connectivity: a fast ball leaves a thin diagonal motion streak that
+      // 4-connectivity would fragment below BALL_MIN.
+      const x0 = px > 0 ? -1 : 0;
+      const x1 = px < w - 1 ? 1 : 0;
+      const y0 = py > 0 ? -1 : 0;
+      const y1 = py < h - 1 ? 1 : 0;
+      for (let dy = y0; dy <= y1; dy++) {
+        for (let dx = x0; dx <= x1; dx++) {
+          const q = p + dy * w + dx;
+          if (mask[q] && !seen[q]) { seen[q] = 1; stack[sp++] = q; }
+        }
+      }
     }
     if (count < BALL_MIN || count > BALL_MAX) continue;
     const bw = maxX - minX + 1;
     const bh = maxY - minY + 1;
     const aspect = bw / bh;
-    if (aspect < 0.25 || aspect > 4) continue;
+    if (aspect < 0.18 || aspect > 5.5) continue;
     const fill = count / (bw * bh);
-    if (fill < 0.3) continue;
+    if (fill < 0.22) continue;
     blobs.push({
       x: sumX / count / w,
       y: sumY / count / h,
@@ -149,6 +157,7 @@ export interface ExtractOptions {
   maxGap?: number; // s — largest allowed hole between consecutive inliers
   minDisp?: number; // normalized path length
   gravityTol?: number; // allowed negative vertical curvature
+  maxRms?: number; // max model-fit residual (normalized)
   samples?: number; // output polyline resolution
   seed?: number;
 }
@@ -159,13 +168,18 @@ export function extractTrajectory(
   dets: Detection[],
   opts: ExtractOptions = {},
 ): Trajectory | null {
-  const thresh = opts.thresh ?? 0.028;
-  const iters = opts.iters ?? 260;
-  const minInliers = opts.minInliers ?? 6;
-  const minSpan = opts.minSpan ?? 0.16;
-  const maxGap = opts.maxGap ?? 0.13;
-  const minDisp = opts.minDisp ?? 0.13;
-  const gravityTol = opts.gravityTol ?? 0.0;
+  // Defaults tuned for a behind-the-ball phone camera: the ball is tiny, is
+  // often lost against the sky for several consecutive frames (maxGap), moves
+  // few on-screen pixels while flying away (minDisp), and its apparent gravity
+  // curvature can be ~0 or slightly negative early in flight (gravityTol).
+  const thresh = opts.thresh ?? 0.032;
+  const iters = opts.iters ?? 600;
+  const minInliers = opts.minInliers ?? 5;
+  const minSpan = opts.minSpan ?? 0.14;
+  const maxGap = opts.maxGap ?? 0.28;
+  const minDisp = opts.minDisp ?? 0.06;
+  const gravityTol = opts.gravityTol ?? 0.06;
+  const maxRms = opts.maxRms ?? 0.009;
   const sampleN = opts.samples ?? 48;
   const rng = lcg(opts.seed ?? 0x9e3779b9);
 
@@ -198,7 +212,111 @@ export function extractTrajectory(
     return chosen;
   };
 
-  let bestSet: Detection[] = [];
+  // Refine a candidate support set (iterative refit + re-collect) and run the
+  // physics gates. Returns the validated trajectory, or null.
+  const refineAndValidate = (seedSet: Detection[]): Trajectory | null => {
+    let bestSet = seedSet;
+    let cx = fitQuadratic(bestSet.map((d) => ({ t: d.t, v: d.x })));
+    let cy = fitQuadratic(bestSet.map((d) => ({ t: d.t, v: d.y })));
+    if (!cx || !cy) return null;
+    for (let pass = 0; pass < 6; pass++) {
+      const set = inliersFor(cx, cy);
+      if (set.length < minInliers) return null;
+      const nx = fitQuadratic(set.map((d) => ({ t: d.t, v: d.x })));
+      const ny = fitQuadratic(set.map((d) => ({ t: d.t, v: d.y })));
+      if (!nx || !ny) break;
+      const grew = set.length > bestSet.length;
+      bestSet = set;
+      cx = nx;
+      cy = ny;
+      if (!grew) break;
+    }
+
+    bestSet.sort((a, b) => a.t - b.t);
+    const tStart = bestSet[0].t;
+    const tEnd = bestSet[bestSet.length - 1].t;
+    const span = tEnd - tStart;
+    if (span < minSpan) return null;
+
+    // Physics gate 1: gravity. In screen space (y down), a real flight curves
+    // downward over time → positive vertical curvature. Reject concave-up-in-air
+    // (i.e. physically impossible) noise chains.
+    if (cy[2] < -gravityTol) return null;
+
+    // Physics gate 2: no large temporal holes (a real flight is continuous).
+    for (let i = 1; i < bestSet.length; i++) {
+      if (bestSet[i].t - bestSet[i - 1].t > maxGap) return null;
+    }
+
+    // Residual RMS of the fit.
+    let se = 0;
+    for (const d of bestSet) {
+      const ex = evalQuad(cx, d.t) - d.x;
+      const ey = evalQuad(cy, d.t) - d.y;
+      se += ex * ex + ey * ey;
+    }
+    const rms = Math.sqrt(se / bestSet.length);
+
+    // Physics gate 4: fit tightness. A real ball tracks its parabola to within
+    // detection jitter; a chain aliased across a band of ambient noise (net,
+    // leaves) hits whatever point is nearest each frame, leaving residuals
+    // near the inlier threshold. Reject sloppy fits.
+    if (rms > maxRms) return null;
+
+    // Sample the smooth model launch→landing.
+    const pts: { x: number; y: number }[] = [];
+    for (let i = 0; i <= sampleN; i++) {
+      const t = tStart + (span * i) / sampleN;
+      pts.push({ x: evalQuad(cx, t), y: evalQuad(cy, t) });
+    }
+    const launch = pts[0];
+    const landing = pts[pts.length - 1];
+
+    // Physics gate 3: the ball must actually travel.
+    let pathLen = 0;
+    for (let i = 1; i < pts.length; i++) {
+      pathLen += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    }
+    if (pathLen < minDisp) return null;
+
+    // Signed horizontal curvature: deviation of the arc from the launch→landing
+    // chord (used to classify draw/fade/slice/hook). pts are uniform in time, so
+    // parameterise the chord by sample fraction (NOT by x, which is degenerate).
+    let maxDev = 0;
+    for (let i = 0; i <= sampleN; i++) {
+      const u = i / sampleN;
+      const lineX = launch.x + (landing.x - launch.x) * u;
+      const dev = pts[i].x - lineX;
+      if (Math.abs(dev) > Math.abs(maxDev)) maxDev = dev;
+    }
+
+    return { pts, maxDev, span, inliers: bestSet.length, rms, launch, landing };
+  };
+
+  // RANSAC over ALL candidate chains — not just the single largest one. The
+  // largest-support chain is usually NOT the ball: the golfer's follow-through,
+  // a walking person or a swaying net produces far more detections than a tiny
+  // ball. Keeping only the biggest chain meant one gated-out noise chain hid a
+  // perfectly valid flight behind it. Instead, collect the distinct top
+  // candidates and return the best one that PASSES the physics gates.
+  // Weighted pick favouring SMALL blobs: the ball is by definition one of the
+  // smallest moving objects in frame, while people/club/branches are large.
+  // Without this bias the minimal sample almost never lands on 3 ball points
+  // when background motion outnumbers the ball 5–10×.
+  const pickSmall = (arr: Detection[]): Detection => {
+    if (arr.length === 1) return arr[0];
+    let tot = 0;
+    for (const d of arr) tot += 1 / (d.size * d.size + 1);
+    let r = rng() * tot;
+    for (const d of arr) {
+      r -= 1 / (d.size * d.size + 1);
+      if (r <= 0) return d;
+    }
+    return arr[arr.length - 1];
+  };
+
+  const candidates: Detection[][] = [];
+  const seenSig = new Set<string>();
   for (let it = 0; it < iters; it++) {
     // Pick 3 distinct, time-spread frames for a minimal fit.
     const i0 = (rng() * times.length) | 0;
@@ -206,88 +324,38 @@ export function extractTrajectory(
     const i2 = (rng() * times.length) | 0;
     if (i0 === i1 || i1 === i2 || i0 === i2) continue;
     const t0 = times[i0], t1 = times[i1], t2 = times[i2];
-    const s0 = byTime.get(t0)![(rng() * byTime.get(t0)!.length) | 0];
-    const s1 = byTime.get(t1)![(rng() * byTime.get(t1)!.length) | 0];
-    const s2 = byTime.get(t2)![(rng() * byTime.get(t2)!.length) | 0];
+    const s0 = pickSmall(byTime.get(t0)!);
+    const s1 = pickSmall(byTime.get(t1)!);
+    const s2 = pickSmall(byTime.get(t2)!);
     const cx = fitQuadratic([s0, s1, s2].map((d) => ({ t: d.t, v: d.x })));
     const cy = fitQuadratic([s0, s1, s2].map((d) => ({ t: d.t, v: d.y })));
     if (!cx || !cy) continue;
     const set = inliersFor(cx, cy);
-    if (set.length > bestSet.length) bestSet = set;
+    if (set.length < minInliers) continue;
+    // Coarse spatial signature (start/mid/end cells) so near-identical chains
+    // collapse into one candidate instead of crowding out distinct ones.
+    const mid = set[set.length >> 1];
+    const last = set[set.length - 1];
+    const cell = (v: number) => Math.round(v * 25);
+    const sig = `${cell(set[0].x)},${cell(set[0].y)}|${cell(mid.x)},${cell(mid.y)}|${cell(last.x)},${cell(last.y)}`;
+    if (seenSig.has(sig)) continue;
+    seenSig.add(sig);
+    candidates.push(set);
   }
+  if (!candidates.length) return null;
 
-  if (bestSet.length < minInliers) return null;
-
-  // Iteratively refit by least squares over the inliers and re-collect until
-  // the support set stops growing. This extends the model to the full flight
-  // (a single minimal sample rarely spans launch→landing on its own).
-  let cx = fitQuadratic(bestSet.map((d) => ({ t: d.t, v: d.x })));
-  let cy = fitQuadratic(bestSet.map((d) => ({ t: d.t, v: d.y })));
-  if (!cx || !cy) return null;
-  for (let pass = 0; pass < 6; pass++) {
-    const set = inliersFor(cx, cy);
-    if (set.length < minInliers) return null;
-    const nx = fitQuadratic(set.map((d) => ({ t: d.t, v: d.x })));
-    const ny = fitQuadratic(set.map((d) => ({ t: d.t, v: d.y })));
-    if (!nx || !ny) break;
-    const grew = set.length > bestSet.length;
-    bestSet = set;
-    cx = nx;
-    cy = ny;
-    if (!grew) break;
+  candidates.sort((a, b) => b.length - a.length);
+  let best: Trajectory | null = null;
+  for (const cand of candidates.slice(0, 64)) {
+    const traj = refineAndValidate(cand);
+    if (
+      traj &&
+      (!best ||
+        traj.inliers > best.inliers ||
+        (traj.inliers === best.inliers && traj.rms < best.rms))
+    ) {
+      best = traj;
+    }
   }
-
-  bestSet.sort((a, b) => a.t - b.t);
-  const tStart = bestSet[0].t;
-  const tEnd = bestSet[bestSet.length - 1].t;
-  const span = tEnd - tStart;
-  if (span < minSpan) return null;
-
-  // Physics gate 1: gravity. In screen space (y down), a real flight curves
-  // downward over time → positive vertical curvature. Reject concave-up-in-air
-  // (i.e. physically impossible) noise chains.
-  if (cy[2] < -gravityTol) return null;
-
-  // Physics gate 2: no large temporal holes (a real flight is continuous).
-  for (let i = 1; i < bestSet.length; i++) {
-    if (bestSet[i].t - bestSet[i - 1].t > maxGap) return null;
-  }
-
-  // Residual RMS of the fit.
-  let se = 0;
-  for (const d of bestSet) {
-    const ex = evalQuad(cx, d.t) - d.x;
-    const ey = evalQuad(cy, d.t) - d.y;
-    se += ex * ex + ey * ey;
-  }
-  const rms = Math.sqrt(se / bestSet.length);
-
-  // Sample the smooth model launch→landing.
-  const pts: { x: number; y: number }[] = [];
-  for (let i = 0; i <= sampleN; i++) {
-    const t = tStart + (span * i) / sampleN;
-    pts.push({ x: evalQuad(cx, t), y: evalQuad(cy, t) });
-  }
-  const launch = pts[0];
-  const landing = pts[pts.length - 1];
-
-  // Physics gate 3: the ball must actually travel.
-  let pathLen = 0;
-  for (let i = 1; i < pts.length; i++) {
-    pathLen += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-  }
-  if (pathLen < minDisp) return null;
-
-  // Signed horizontal curvature: deviation of the arc from the launch→landing
-  // chord (used to classify draw/fade/slice/hook). pts are uniform in time, so
-  // parameterise the chord by sample fraction (NOT by x, which is degenerate).
-  let maxDev = 0;
-  for (let i = 0; i <= sampleN; i++) {
-    const u = i / sampleN;
-    const lineX = launch.x + (landing.x - launch.x) * u;
-    const dev = pts[i].x - lineX;
-    if (Math.abs(dev) > Math.abs(maxDev)) maxDev = dev;
-  }
-
-  return { pts, maxDev, span, inliers: bestSet.length, rms, launch, landing };
+  return best;
 }

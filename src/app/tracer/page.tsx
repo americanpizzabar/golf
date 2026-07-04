@@ -95,6 +95,8 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const lastImpactRef = useRef(0);
 
   const [phase, setPhase] = useState<"watching" | "capturing">("watching");
+  const [missed, setMissed] = useState(false); // verification found no valid flight
+  const missedTimerRef = useRef(0);
   const [micOn, setMicOn] = useState(false);
   const [camOn, setCamOn] = useState(false);
   const [club, setClub] = useState("DR");
@@ -118,7 +120,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const MAX_FLIGHT_S = 2.2; // longest plausible flight to inspect
   const ANALYZE_DELAY_MS = 1700; // "verify the past from the future" delay (~1.7s)
   const REVEAL_MS = 750; // dramatic line-grow animation
-  const LAUNCH = 0.05; // visual-launch displacement / frame (fallback trigger)
+  const LAUNCH = 0.035; // visual-launch displacement / frame (fallback trigger)
 
   // Pre-fill head speed from the latest analyzed swing of this club.
   useEffect(() => {
@@ -133,6 +135,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     streamRef.current?.getTracks().forEach((tr) => tr.stop());
     audioCtxRef.current?.close().catch(() => {});
     cancelAnimationFrame(rafRef.current);
+    window.clearTimeout(missedTimerRef.current);
   }, []);
 
   async function startCam() {
@@ -160,9 +163,12 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       await videoRef.current.play().catch(() => {});
     }
     if (!diffRef.current) {
+      // Detection resolution: at 160×120 a golf ball a few metres away shrinks
+      // below one pixel and frame differencing never sees it. 320×240 keeps the
+      // per-frame cost low while giving the ball a 2–8 px footprint.
       const c = document.createElement("canvas");
-      c.width = 160;
-      c.height = 120;
+      c.width = 320;
+      c.height = 240;
       diffRef.current = c;
     }
     // Set up impact-sound analyser if we captured an audio track.
@@ -301,6 +307,8 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     t0Ref.current = now / 1000;
     analyzeAtRef.current = now + ANALYZE_DELAY_MS;
     revealRef.current = null; // clear any previous trace
+    window.clearTimeout(missedTimerRef.current);
+    setMissed(false);
     setResult(null);
     setPhase("capturing");
   }
@@ -316,7 +324,14 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     const hi = t0 + MAX_FLIGHT_S;
     const dets = bufferRef.current.filter((d) => d.t >= lo && d.t <= hi);
     const traj = extractTrajectory(dets);
-    if (!traj) return; // noise only → draw nothing
+    if (!traj) {
+      // Noise only → draw nothing, but tell the user we looked (a silent
+      // discard reads as "the tracer is not reacting at all").
+      setMissed(true);
+      window.clearTimeout(missedTimerRef.current);
+      missedTimerRef.current = window.setTimeout(() => setMissed(false), 3000);
+      return;
+    }
 
     const shape = classifyShape(traj.maxDev);
     const est = estimateBall(clubRef.current, headSpeedRef.current);
@@ -426,6 +441,12 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
             <div className="absolute bottom-2 left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-full text-sm font-bold flex items-center gap-2"
               style={{ background: shapeColor(result.shape), color: "#04121f" }}>
               {t(shapeLabel(result.shape))} ・ Peak {result.apex}m
+            </div>
+          )}
+          {missed && !result && (
+            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full text-xs font-bold text-center"
+              style={{ background: "rgba(0,0,0,0.65)", color: "#fbbf24" }}>
+              {t("⚠ 弾道を検出できず。ボールが大きく映る位置から撮ってみてください")}
             </div>
           )}
         </div>
