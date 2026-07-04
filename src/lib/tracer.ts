@@ -29,6 +29,8 @@ export interface Trajectory {
   rms: number; // model fit residual (normalized px)
   launch: { x: number; y: number };
   landing: { x: number; y: number };
+  tStart: number; // camera time of first supporting detection (s)
+  tEnd: number; // camera time of last supporting detection (s)
 }
 
 // ---- Motion blob detection (frame differencing) ---------------------------
@@ -36,6 +38,14 @@ export interface Trajectory {
 // downstream has the full candidate set to choose the real ball from. The ball
 // is NOT identified here — color/size alone can't separate it from noise; only
 // the trajectory fit can. Sorted by "ball-likeness" and capped.
+// Scratch buffers reused across calls — this runs per camera frame (30-60/s)
+// and re-allocating ~1MB each time causes measurable GC churn on phones.
+let scratchN = -1;
+let sDiff = new Uint16Array(0);
+let sMask = new Uint8Array(0);
+let sSeen = new Uint8Array(0);
+let sStack = new Int32Array(0);
+
 export function findMovingBlobs(
   cur: Uint8ClampedArray,
   prev: Uint8ClampedArray,
@@ -44,20 +54,48 @@ export function findMovingBlobs(
   cap = 24,
 ): RawBlob[] {
   const n = w * h;
-  const mask = new Uint8Array(n);
+  if (n !== scratchN) {
+    scratchN = n;
+    sDiff = new Uint16Array(n);
+    sMask = new Uint8Array(n);
+    sSeen = new Uint8Array(n);
+    sStack = new Int32Array(n);
+  } else {
+    sMask.fill(0);
+    sSeen.fill(0);
+  }
+  const diff = sDiff;
+  let dSum = 0;
   for (let p = 0, i = 0; p < n; p++, i += 4) {
     const d =
       Math.abs(cur[i] - prev[i]) +
       Math.abs(cur[i + 1] - prev[i + 1]) +
       Math.abs(cur[i + 2] - prev[i + 2]);
-    if (d > 42) mask[p] = 1;
+    diff[p] = d;
+    dSum += d;
   }
+  // Adaptive threshold on the frame's own noise floor: a quiet tripod scene
+  // (mean diff ~1-4) drops to ~26 so a faint distant ball still registers,
+  // while wind/handheld shake raises it toward 64 instead of flooding the
+  // mask with noise blobs.
+  const thr = Math.min(64, Math.max(26, 12 + (dSum / n) * 5));
+  const mask = sMask;
+  let on = 0;
+  for (let p = 0; p < n; p++) {
+    if (diff[p] > thr) {
+      mask[p] = 1;
+      on++;
+    }
+  }
+  // Global change (exposure/AGC shift, camera knock): the whole frame moved,
+  // nothing useful can be segmented — skip rather than emit garbage.
+  if (on > n * 0.1) return [];
 
   const BALL_MIN = 2;
   const BALL_MAX = Math.max(150, (n / 128) | 0); // scales with detection resolution
   const blobs: (RawBlob & { score: number })[] = [];
-  const stack = new Int32Array(n);
-  const seen = new Uint8Array(n);
+  const stack = sStack;
+  const seen = sSeen;
   for (let start = 0; start < n; start++) {
     if (!mask[start] || seen[start]) continue;
     let sp = 0;
@@ -290,7 +328,7 @@ export function extractTrajectory(
       if (Math.abs(dev) > Math.abs(maxDev)) maxDev = dev;
     }
 
-    return { pts, maxDev, span, inliers: bestSet.length, rms, launch, landing };
+    return { pts, maxDev, span, inliers: bestSet.length, rms, launch, landing, tStart, tEnd };
   };
 
   // RANSAC over ALL candidate chains — not just the single largest one. The

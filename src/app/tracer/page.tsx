@@ -36,6 +36,12 @@ interface Pt {
   y: number;
 }
 
+// requestVideoFrameCallback is not yet in the DOM lib types everywhere.
+type VfcVideo = HTMLVideoElement & {
+  requestVideoFrameCallback?: (cb: (now: number) => void) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+};
+
 export default function TracerPage() {
   const t = useT();
   const [tab, setTab] = useState<"trace" | "matrix">("trace");
@@ -86,6 +92,10 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const t0Ref = useRef<number | null>(null); // armed impact time (s), null = watching
   const analyzeAtRef = useRef(0); // perf-ms at which to run backward verification
   const revealRef = useRef<{ traj: Trajectory; shape: BallShape; start: number } | null>(null);
+  const lastScanRef = useRef(0); // perf-ms of the last continuous scan
+  const cooldownUntilRef = useRef(0); // perf-ms until which detection is muted
+  const vfcRef = useRef(0); // requestVideoFrameCallback handle
+  const usingVfcRef = useRef(false);
 
   // Impact-sound detection (layer 2): a sharp audio transient sets t0.
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -121,6 +131,10 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const ANALYZE_DELAY_MS = 1700; // "verify the past from the future" delay (~1.7s)
   const REVEAL_MS = 750; // dramatic line-grow animation
   const LAUNCH = 0.035; // visual-launch displacement / frame (fallback trigger)
+  const SCAN_EVERY_MS = 900; // continuous-scan cadence when no trigger fired
+  const SCAN_WINDOW_S = 2.6; // how far back a continuous scan looks
+  const QUIET_S = 0.35; // flight must have ENDED this long ago (> extractor maxGap)
+  const COOLDOWN_MS = 5000; // suppress re-detection of the shot just revealed
 
   // Pre-fill head speed from the latest analyzed swing of this club.
   useEffect(() => {
@@ -135,6 +149,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     streamRef.current?.getTracks().forEach((tr) => tr.stop());
     audioCtxRef.current?.close().catch(() => {});
     cancelAnimationFrame(rafRef.current);
+    (videoRef.current as VfcVideo | null)?.cancelVideoFrameCallback?.(vfcRef.current);
     window.clearTimeout(missedTimerRef.current);
   }, []);
 
@@ -163,12 +178,13 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       await videoRef.current.play().catch(() => {});
     }
     if (!diffRef.current) {
-      // Detection resolution: at 160×120 a golf ball a few metres away shrinks
-      // below one pixel and frame differencing never sees it. 320×240 keeps the
-      // per-frame cost low while giving the ball a 2–8 px footprint.
+      // Detection resolution: at low resolution a golf ball a few metres away
+      // shrinks below one pixel and frame differencing never sees it. 400×300
+      // keeps the per-frame cost manageable while giving the ball a 2–10 px
+      // footprint for most of the visible flight.
       const c = document.createElement("canvas");
-      c.width = 320;
-      c.height = 240;
+      c.width = 400;
+      c.height = 300;
       diffRef.current = c;
     }
     // Set up impact-sound analyser if we captured an audio track.
@@ -199,9 +215,24 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     t0Ref.current = null;
     revealRef.current = null;
     lastImpactRef.current = 0;
+    lastScanRef.current = 0;
+    cooldownUntilRef.current = 0;
     setPhase("watching");
     setResult(null);
     setCamOn(true);
+    // Detection runs once per CAMERA frame via requestVideoFrameCallback when
+    // available (exact frame timestamps, no missed/duplicated frames at any
+    // display refresh rate); the rAF loop then only renders. Fallback: capture
+    // inside the rAF loop as before.
+    const vv = videoRef.current as VfcVideo | null;
+    usingVfcRef.current = !!vv?.requestVideoFrameCallback;
+    if (vv && usingVfcRef.current) {
+      const tick = (now: number) => {
+        captureFrame(now);
+        if (streamRef.current) vfcRef.current = vv.requestVideoFrameCallback!(tick);
+      };
+      vfcRef.current = vv.requestVideoFrameCallback!(tick);
+    }
     rafRef.current = requestAnimationFrame(loop);
   }
 
@@ -212,30 +243,38 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     audioCtxRef.current = null;
     analyserRef.current = null;
     cancelAnimationFrame(rafRef.current);
+    (videoRef.current as VfcVideo | null)?.cancelVideoFrameCallback?.(vfcRef.current);
     revealRef.current = null;
     t0Ref.current = null;
     setPhase("watching");
     setCamOn(false);
   }
 
+  // Grab one camera frame into the diff canvas and run detection on it.
+  function captureFrame(now: number) {
+    const video = videoRef.current;
+    const dc = diffRef.current;
+    if (!video || !dc || video.readyState < 2 || !video.videoWidth) return;
+    const dctx = dc.getContext("2d", { willReadFrequently: true });
+    if (!dctx) return;
+    dctx.drawImage(video, 0, 0, dc.width, dc.height);
+    const cur = dctx.getImageData(0, 0, dc.width, dc.height);
+    const prev = prevRef.current;
+    if (prev) captureStep(cur.data, prev, dc.width, dc.height, now);
+    prevRef.current = cur.data.slice(0);
+  }
+
   function loop(now: number) {
+    if (!usingVfcRef.current) captureFrame(now);
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const dc = diffRef.current;
-    if (video && canvas && dc && video.readyState >= 2 && video.videoWidth) {
+    if (video && canvas && video.videoWidth) {
       if (canvas.width !== video.videoWidth) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
       }
-      const dctx = dc.getContext("2d", { willReadFrequently: true });
       const octx = canvas.getContext("2d");
-      if (dctx && octx) {
-        dctx.drawImage(video, 0, 0, dc.width, dc.height);
-        const cur = dctx.getImageData(0, 0, dc.width, dc.height);
-        const prev = prevRef.current;
-        if (prev) captureStep(cur.data, prev, dc.width, dc.height, now);
-        prevRef.current = cur.data.slice(0);
-
+      if (octx) {
         // Render: NOTHING during flight/verification (no garbage lines). Only a
         // validated trajectory is ever drawn, as a delayed dramatic reveal.
         octx.clearRect(0, 0, canvas.width, canvas.height);
@@ -259,10 +298,33 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     if (t0Ref.current == null) {
       // Layer 2: impact sound. Layer (fallback): visual launch.
       if (!detectImpactSound(now)) tryVisualLaunch(blobs, now);
+      // Layer 3: continuous scan. Even when NO trigger fired (mic denied,
+      // faint impact, launch missed), periodically look back over the buffer
+      // for a completed physically-valid flight — a shot must never be lost
+      // just because its trigger was.
+      if (
+        t0Ref.current == null &&
+        now >= cooldownUntilRef.current &&
+        now - lastScanRef.current >= SCAN_EVERY_MS
+      ) {
+        lastScanRef.current = now;
+        scanRecent(now);
+      }
     } else if (now >= analyzeAtRef.current) {
-      analyze();
+      analyze(now);
     }
     prevBlobsRef.current = blobs;
+  }
+
+  // Trigger-less detection: scan the rolling buffer for a flight that is
+  // already OVER (quiet for QUIET_S) so the delayed-reveal rule still holds.
+  function scanRecent(now: number) {
+    const tSec = now / 1000;
+    const dets = bufferRef.current.filter((d) => d.t >= tSec - SCAN_WINDOW_S);
+    if (dets.length < 6) return;
+    const traj = extractTrajectory(dets);
+    if (!traj || tSec - traj.tEnd < QUIET_S) return;
+    reveal(traj, now);
   }
 
   // Sharp audio transient → impact. Returns true if it armed this frame.
@@ -303,7 +365,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   }
 
   function arm(now: number) {
-    if (t0Ref.current != null) return;
+    if (t0Ref.current != null || now < cooldownUntilRef.current) return;
     t0Ref.current = now / 1000;
     analyzeAtRef.current = now + ANALYZE_DELAY_MS;
     revealRef.current = null; // clear any previous trace
@@ -315,7 +377,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
 
   // Backward verification: recover the one physically-valid flight from the
   // buffered window, or discard silently (no false line).
-  function analyze() {
+  function analyze(now: number) {
     const t0 = t0Ref.current;
     t0Ref.current = null;
     setPhase("watching");
@@ -326,16 +388,23 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     const traj = extractTrajectory(dets);
     if (!traj) {
       // Noise only → draw nothing, but tell the user we looked (a silent
-      // discard reads as "the tracer is not reacting at all").
+      // discard reads as "the tracer is not reacting at all"). The continuous
+      // scan keeps watching, so a late/slow flight can still be recovered.
       setMissed(true);
       window.clearTimeout(missedTimerRef.current);
       missedTimerRef.current = window.setTimeout(() => setMissed(false), 3000);
       return;
     }
+    reveal(traj, now);
+  }
 
+  function reveal(traj: Trajectory, now: number) {
+    cooldownUntilRef.current = now + COOLDOWN_MS; // don't re-detect this shot
+    window.clearTimeout(missedTimerRef.current);
+    setMissed(false);
     const shape = classifyShape(traj.maxDev);
     const est = estimateBall(clubRef.current, headSpeedRef.current);
-    revealRef.current = { traj, shape, start: performance.now() };
+    revealRef.current = { traj, shape, start: now };
     setResult({ shape, apex: est.apex, carry: est.carry, ballSpeed: est.ballSpeed, smash: est.smash, pts: traj.pts });
     if (navigator.vibrate) navigator.vibrate(20);
     saveBallShot({
