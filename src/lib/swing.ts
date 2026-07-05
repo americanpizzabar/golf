@@ -119,12 +119,41 @@ export interface SwingResult {
   valid: boolean;
 }
 
+// Zero-lag temporal smoothing (3-tap binomial per landmark, weighted by
+// visibility). Landmark jitter otherwise leaks straight into the derived
+// metrics — especially peak wrist speed, where a single-frame spike can
+// swing the estimated head speed by several m/s. Centered weights add no
+// phase delay, so event indices (top/impact) stay aligned.
+export function smoothFrames(frames: Frame[]): Frame[] {
+  if (frames.length < 3) return frames;
+  const W = [0.25, 0.5, 0.25];
+  return frames.map((f, i) => {
+    if (i === 0 || i === frames.length - 1) return f;
+    return f.map((p, j) => {
+      if (!p) return p;
+      let sx = 0, sy = 0, sz = 0, sw = 0;
+      for (let k = -1; k <= 1; k++) {
+        const q = frames[i + k][j];
+        if (!q || (q.x === 0 && q.y === 0)) continue;
+        const w = W[k + 1] * (q.visibility ?? 1);
+        sx += q.x * w;
+        sy += q.y * w;
+        sz += (q.z ?? 0) * w;
+        sw += w;
+      }
+      if (sw <= 0) return p;
+      return { ...p, x: sx / sw, y: sy / sw, z: sz / sw };
+    });
+  });
+}
+
 // Analyze a sequence of pose frames into golf swing metrics.
 export function analyzeSwing(
-  frames: Frame[],
+  rawFrames: Frame[],
   opts: { heightCm?: number; leftHanded?: boolean; fps?: number; clubFactor?: number } = {},
 ): SwingResult {
   const fps = opts.fps && opts.fps > 0 ? opts.fps : 30;
+  const frames = smoothFrames(rawFrames);
   const fm = frames.map((f) => frameMetrics(f, opts.leftHanded));
   const good = fm.filter((m) => m.ok);
   const valid = good.length >= 5 && frames.length >= 6;
@@ -221,11 +250,14 @@ export function analyzeSwing(
   // metersPerNorm = 身長(m) / 体の縦ピクセル割合(正規化)。
   const metersPerNorm = (heightCm / 100) / bodyPx;
   const dt = 1 / fps;
+  // Central difference where possible: half the discretization noise of a
+  // backward difference for the same landmark jitter.
   const wristSpeedAt = (i: number) => {
     if (i <= 0) return 0;
-    const a = fm[i].leadArm.wr;
+    const hi = Math.min(i + 1, fm.length - 1);
+    const a = fm[hi].leadArm.wr;
     const b = fm[i - 1].leadArm.wr;
-    return (Math.hypot(a.x - b.x, a.y - b.y) * metersPerNorm) / dt;
+    return (Math.hypot(a.x - b.x, a.y - b.y) * metersPerNorm) / ((hi - (i - 1)) * dt);
   };
   let peakHand = 0;
   let peakHandIdx = impactIdx;

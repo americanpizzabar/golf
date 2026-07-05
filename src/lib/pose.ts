@@ -66,6 +66,13 @@ export const POSE_CONNECTIONS: [number, number][] = [
 // Landmark groups for sizing nodes (face/hands drawn smaller than body joints).
 const SMALL_NODES = new Set<number>([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19, 20, 21, 22, 29, 30, 31, 32]);
 
+const MODEL_BASE = "https://storage.googleapis.com/mediapipe-models/pose_landmarker";
+// "full" is markedly more precise on fast limbs (wrists mid-downswing) than
+// "lite" at a still-realtime cost on phones; lite stays as the fallback for
+// devices/networks where full can't load.
+const MODEL_FULL = `${MODEL_BASE}/pose_landmarker_full/float16/1/pose_landmarker_full.task`;
+const MODEL_LITE = `${MODEL_BASE}/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`;
+
 let landmarkerPromise: Promise<PoseLandmarker> | null = null;
 
 export async function getPoseLandmarker(): Promise<PoseLandmarker> {
@@ -76,23 +83,25 @@ export async function getPoseLandmarker(): Promise<PoseLandmarker> {
         // in package.json — a JS/WASM version skew causes runtime failures.
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm",
       );
-      const opts = (delegate: "GPU" | "CPU") => ({
-        baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-          delegate,
-        },
+      const opts = (model: string, delegate: "GPU" | "CPU") => ({
+        baseOptions: { modelAssetPath: model, delegate },
         runningMode: "VIDEO" as const,
         numPoses: 1,
         minPoseDetectionConfidence: 0.5,
         minPosePresenceConfidence: 0.5,
         minTrackingConfidence: 0.5,
       });
+      // Preference order: full/GPU → full/CPU → lite/GPU → lite/CPU.
       try {
-        return await PoseLandmarker.createFromOptions(vision, opts("GPU"));
+        return await PoseLandmarker.createFromOptions(vision, opts(MODEL_FULL, "GPU"));
+      } catch { /* try next */ }
+      try {
+        return await PoseLandmarker.createFromOptions(vision, opts(MODEL_FULL, "CPU"));
+      } catch { /* try next */ }
+      try {
+        return await PoseLandmarker.createFromOptions(vision, opts(MODEL_LITE, "GPU"));
       } catch {
-        // Some devices/browsers lack the WebGPU/WebGL delegate — fall back to CPU.
-        return await PoseLandmarker.createFromOptions(vision, opts("CPU"));
+        return await PoseLandmarker.createFromOptions(vision, opts(MODEL_LITE, "CPU"));
       }
     })();
     // Don't permanently cache a rejected init (e.g. transient network failure).
@@ -114,11 +123,9 @@ export async function getSegLandmarker(): Promise<PoseLandmarker> {
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm",
       );
       const opts = (delegate: "GPU" | "CPU") => ({
-        baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-          delegate,
-        },
+        // The silhouette overlay runs the mask every frame — lite keeps it
+        // realtime; measurement accuracy comes from the main (full) landmarker.
+        baseOptions: { modelAssetPath: MODEL_LITE, delegate },
         runningMode: "VIDEO" as const,
         numPoses: 1,
         outputSegmentationMasks: true,

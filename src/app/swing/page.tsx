@@ -309,9 +309,17 @@ export default function SwingPage() {
     setUZoom(1);
     setPan({ x: 0, y: 0 });
     setStage("loading");
+    // 1080p + 60fps when the device can: sharper landmarks for the pose model
+    // and twice the temporal resolution through impact. `ideal` never rejects —
+    // unsupported devices just deliver their best mode.
+    const quality: MediaTrackConstraints = {
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      frameRate: { ideal: 60 },
+    };
     const videoConstraint: MediaTrackConstraints = opts?.deviceId
-      ? { deviceId: { exact: opts.deviceId }, width: { ideal: 1280 } }
-      : { facingMode: { ideal: want }, width: { ideal: 1280 } };
+      ? { deviceId: { exact: opts.deviceId }, ...quality }
+      : { facingMode: { ideal: want }, ...quality };
     let stream: MediaStream | null = null;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraint, audio: false });

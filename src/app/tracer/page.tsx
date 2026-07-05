@@ -96,6 +96,8 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const cooldownUntilRef = useRef(0); // perf-ms until which detection is muted
   const vfcRef = useRef(0); // requestVideoFrameCallback handle
   const usingVfcRef = useRef(false);
+  const capDtEmaRef = useRef(0); // smoothed ms between processed frames
+  const lastCapMsRef = useRef(0);
 
   // Impact-sound detection (layer 2): a sharp audio transient sets t0.
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -161,10 +163,18 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     let s: MediaStream | null = null;
     // Request audio too so the impact-sound trigger can work; degrade to
     // video-only (visual-launch trigger) if the mic is unavailable/denied.
+    // 60fps doubles the detections supporting each flight's RANSAC fit; 1080p
+    // sharpens the downsampled diff frame. Both `ideal` → never rejected.
+    const hq = {
+      facingMode: { ideal: "environment" },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      frameRate: { ideal: 60 },
+    } as MediaTrackConstraints;
     const tries: MediaStreamConstraints[] = [
-      { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } }, audio: true },
+      { video: hq, audio: true },
       { video: true, audio: true },
-      { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } }, audio: false },
+      { video: hq, audio: false },
       { video: true, audio: false },
     ];
     for (const c of tries) {
@@ -179,12 +189,12 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     }
     if (!diffRef.current) {
       // Detection resolution: at low resolution a golf ball a few metres away
-      // shrinks below one pixel and frame differencing never sees it. 400×300
-      // keeps the per-frame cost manageable while giving the ball a 2–10 px
-      // footprint for most of the visible flight.
+      // shrinks below one pixel and frame differencing never sees it. Start at
+      // 480×360 (2–12 px ball footprint); captureFrame auto-drops to 320×240
+      // if the device can't keep up.
       const c = document.createElement("canvas");
-      c.width = 400;
-      c.height = 300;
+      c.width = 480;
+      c.height = 360;
       diffRef.current = c;
     }
     // Set up impact-sound analyser if we captured an audio track.
@@ -217,6 +227,8 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     lastImpactRef.current = 0;
     lastScanRef.current = 0;
     cooldownUntilRef.current = 0;
+    capDtEmaRef.current = 0;
+    lastCapMsRef.current = 0;
     setPhase("watching");
     setResult(null);
     setCamOn(true);
@@ -255,6 +267,24 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     const video = videoRef.current;
     const dc = diffRef.current;
     if (!video || !dc || video.readyState < 2 || !video.videoWidth) return;
+    // Watch the achieved processing rate: if we can't sustain ~22fps the
+    // device is compute-bound — permanently drop to the cheaper resolution
+    // (fewer, bigger pixels beat dropped frames for trajectory recovery).
+    if (lastCapMsRef.current) {
+      const dt = now - lastCapMsRef.current;
+      // Ignore pauses (tab hidden, camera restart) — they are not "slow".
+      if (dt < 500) {
+        capDtEmaRef.current = capDtEmaRef.current
+          ? capDtEmaRef.current * 0.9 + dt * 0.1
+          : dt;
+      }
+      if (capDtEmaRef.current > 45 && dc.width > 320) {
+        dc.width = 320;
+        dc.height = 240;
+        prevRef.current = null;
+      }
+    }
+    lastCapMsRef.current = now;
     const dctx = dc.getContext("2d", { willReadFrequently: true });
     if (!dctx) return;
     dctx.drawImage(video, 0, 0, dc.width, dc.height);

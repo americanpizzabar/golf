@@ -13,6 +13,7 @@ import {
 import { PageHeader, Card, Stat } from "@/components/ui";
 import { LIE_LABELS, LIE_ORDER, dispersionStats } from "@/lib/golf";
 import { fetchApproaches, saveApproach } from "@/lib/db";
+import { findMovingBlobs } from "@/lib/tracer";
 import type { ApproachSession, LieType, Shot } from "@/lib/types";
 import { useT } from "@/lib/i18n";
 
@@ -132,9 +133,14 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
   const vDRef = useRef<V2>({ x: 0, y: 0.13 }); // screen vector for +1m toward camera
   const shapeRef = useRef<ShapeKey>("round");
   const activeRef = useRef(false);
-  const settleRef = useRef(0);
+  const lastMotionMsRef = useRef(0);
   const lastCentroidRef = useRef<{ x: number; y: number } | null>(null);
+  const trackStartRef = useRef<{ x: number; y: number; t: number } | null>(null);
   const lastShotMsRef = useRef(0);
+  // Chronic-motion heatmap (HEAT_G × HEAT_G cells): suppresses persistent
+  // movers (waving flag, shimmering grass) so only a NEW mover — the arriving
+  // ball — is tracked.
+  const heatRef = useRef<Float32Array | null>(null);
 
   const [camOn, setCamOn] = useState(false);
   const [phase, setPhase] = useState<"target" | "measuring">("target");
@@ -174,7 +180,15 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
     }
     let s: MediaStream | null = null;
     try {
-      s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+      s = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 60 },
+        },
+        audio: false,
+      });
     } catch {
       try {
         s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
@@ -190,9 +204,11 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
       await videoRef.current.play().catch(() => {});
     }
     if (!diffRef.current) {
+      // 96×96 shrank a golf ball on the green below the detectable size; at
+      // 224×224 the ball (and its landing bounce) keeps a multi-pixel footprint.
       const c = document.createElement("canvas");
-      c.width = 96;
-      c.height = 96;
+      c.width = 224;
+      c.height = 224;
       diffRef.current = c;
     }
     prevRef.current = null;
@@ -224,7 +240,16 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
     return ctx.getImageData(0, 0, c.width, c.height);
   }
 
-  // 背景差分による着弾検知：動きの重心を追い、静止した瞬間の位置を着弾点とする。β。
+  const HEAT_G = 28; // chronic-motion grid resolution
+  const HEAT_ON = 4; // cell heat above which a mover counts as "chronic"
+  const SETTLE_MS = 450; // ball quiet this long → it has come to rest
+  const TRACK_R = 0.35; // max per-frame jump to stay on the same track
+  const MIN_TRACK_DISP = 0.05; // a real shot travels; jitter tracks don't
+  const MIN_TRACK_MS = 250; // ...and lives longer than a noise blip
+
+  // 着弾検知：ボールらしい移動ブロブ（小さく・コンパクト）だけを追跡し、
+  // 動きが止まった位置を着弾点として記録する。旗や芝の揺れなど「ずっと
+  // 動いているもの」はヒートマップで除外する。β。
   function detectLoop(now: number) {
     const c = diffRef.current;
     if (c && measuringRef.current && pinRef.current) {
@@ -232,36 +257,55 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
       const prev = prevRef.current;
       if (cur) {
         if (prev) {
-          let sx = 0;
-          let sy = 0;
-          let cnt = 0;
-          const w = c.width;
-          const data = cur.data;
-          for (let i = 0; i < data.length; i += 4) {
-            const d = Math.abs(data[i] - prev[i]) + Math.abs(data[i + 1] - prev[i + 1]) + Math.abs(data[i + 2] - prev[i + 2]);
-            if (d > 90) {
-              const px = (i / 4) % w;
-              const py = Math.floor(i / 4 / w);
-              sx += px;
-              sy += py;
-              cnt++;
-            }
-          }
-          const motion = cnt / (data.length / 4);
-          if (motion > 0.015) {
-            activeRef.current = true;
-            settleRef.current = 0;
-            lastCentroidRef.current = { x: sx / cnt / w, y: sy / cnt / c.height };
-          } else if (activeRef.current) {
-            settleRef.current += 1;
-            // settled for a few frames → record the resting position
-            if (settleRef.current > 6 && now - lastShotMsRef.current > 1500) {
-              activeRef.current = false;
-              const cpt = lastCentroidRef.current;
-              if (cpt && pinRef.current) {
-                lastShotMsRef.current = now;
-                registerShot(cpt.x, cpt.y);
+          const heat =
+            heatRef.current ?? (heatRef.current = new Float32Array(HEAT_G * HEAT_G));
+          const blobs = findMovingBlobs(cur.data, prev, c.width, c.height);
+          // Update chronic-motion heat, then keep only "fresh" movers.
+          for (let i = 0; i < heat.length; i++) heat[i] *= 0.95;
+          const cellOf = (b: { x: number; y: number }) =>
+            Math.min(HEAT_G - 1, (b.y * HEAT_G) | 0) * HEAT_G +
+            Math.min(HEAT_G - 1, (b.x * HEAT_G) | 0);
+          const fresh = blobs.filter((b) => {
+            const cell = cellOf(b);
+            heat[cell] += 1;
+            return heat[cell] < HEAT_ON;
+          });
+
+          if (fresh.length) {
+            // Prefer continuity with the current track; otherwise start a new
+            // track on the most ball-like blob (findMovingBlobs sorts by that).
+            const last = lastCentroidRef.current;
+            let chosen: { x: number; y: number } | null = null;
+            if (last && activeRef.current) {
+              let bd = TRACK_R;
+              for (const b of fresh) {
+                const d = Math.hypot(b.x - last.x, b.y - last.y);
+                if (d < bd) { bd = d; chosen = b; }
               }
+            }
+            if (!chosen) {
+              chosen = fresh[0];
+              trackStartRef.current = { x: chosen.x, y: chosen.y, t: now };
+            }
+            lastCentroidRef.current = { x: chosen.x, y: chosen.y };
+            lastMotionMsRef.current = now;
+            activeRef.current = true;
+          } else if (
+            activeRef.current &&
+            now - lastMotionMsRef.current > SETTLE_MS &&
+            now - lastShotMsRef.current > 1500
+          ) {
+            // The tracked mover stopped. Register it as the landing only if
+            // the track actually behaved like a shot: it travelled across the
+            // frame and lived a while (a jittering flag/warm-up blip doesn't).
+            activeRef.current = false;
+            const cpt = lastCentroidRef.current;
+            const st = trackStartRef.current;
+            const moved = cpt && st ? Math.hypot(cpt.x - st.x, cpt.y - st.y) : 0;
+            const lived = st ? lastMotionMsRef.current - st.t : 0;
+            if (cpt && pinRef.current && moved >= MIN_TRACK_DISP && lived >= MIN_TRACK_MS) {
+              lastShotMsRef.current = now;
+              registerShot(cpt.x, cpt.y);
             }
           }
         }
@@ -329,7 +373,10 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
     if (!calibrated) return;
     measuringRef.current = true;
     activeRef.current = false;
-    settleRef.current = 0;
+    lastMotionMsRef.current = 0;
+    lastCentroidRef.current = null;
+    trackStartRef.current = null;
+    heatRef.current?.fill(0);
     setPhase("measuring");
   }
   function stopMeasuring() {
