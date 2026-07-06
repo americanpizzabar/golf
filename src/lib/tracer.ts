@@ -33,6 +33,95 @@ export interface Trajectory {
   tEnd: number; // camera time of last supporting detection (s)
 }
 
+// ---- Global camera-motion estimation ---------------------------------------
+// Estimates the frame-to-frame translation of the WHOLE scene (handheld shake,
+// small pans) from mean-subtracted luminance projection profiles: correlating
+// the column sums gives dx, the row sums give dy, each refined to sub-pixel by
+// parabolic interpolation. O(n + w·M) — cheap enough to run every frame.
+export interface FrameShift {
+  dx: number; // px the scene moved since the previous frame (+ = right)
+  dy: number;
+}
+
+let scratchW = -1;
+let scratchH = -1;
+let sColCur = new Float64Array(0);
+let sColPrev = new Float64Array(0);
+let sRowCur = new Float64Array(0);
+let sRowPrev = new Float64Array(0);
+
+function best1DShift(a: Float64Array, b: Float64Array, M: number): number {
+  // d minimizing mean |a[i] − b[i−d]| over the overlap, sub-pixel refined.
+  const S = new Float64Array(2 * M + 1);
+  let bestD = 0;
+  let bestS = Infinity;
+  for (let d = -M; d <= M; d++) {
+    let s = 0;
+    let c = 0;
+    const i0 = Math.max(0, d);
+    const i1 = Math.min(a.length, a.length + d);
+    for (let i = i0; i < i1; i++) {
+      s += Math.abs(a[i] - b[i - d]);
+      c++;
+    }
+    s = c ? s / c : Infinity;
+    S[d + M] = s;
+    if (s < bestS) { bestS = s; bestD = d; }
+  }
+  const k = bestD + M;
+  if (k > 0 && k < S.length - 1) {
+    const den = S[k - 1] - 2 * S[k] + S[k + 1];
+    if (den > 1e-9) bestD += (0.5 * (S[k - 1] - S[k + 1])) / den;
+  }
+  return bestD;
+}
+
+export function estimateShift(
+  cur: Uint8ClampedArray,
+  prev: Uint8ClampedArray,
+  w: number,
+  h: number,
+): FrameShift {
+  if (w !== scratchW || h !== scratchH) {
+    scratchW = w;
+    scratchH = h;
+    sColCur = new Float64Array(w);
+    sColPrev = new Float64Array(w);
+    sRowCur = new Float64Array(h);
+    sRowPrev = new Float64Array(h);
+  } else {
+    sColCur.fill(0);
+    sColPrev.fill(0);
+    sRowCur.fill(0);
+    sRowPrev.fill(0);
+  }
+  for (let y = 0, i = 0; y < h; y++) {
+    for (let x = 0; x < w; x++, i += 4) {
+      const lc = cur[i] + cur[i + 1] + cur[i + 2];
+      const lp = prev[i] + prev[i + 1] + prev[i + 2];
+      sColCur[x] += lc;
+      sColPrev[x] += lp;
+      sRowCur[y] += lc;
+      sRowPrev[y] += lp;
+    }
+  }
+  // Mean-subtract so a global exposure/AGC change doesn't read as motion.
+  const demean = (arr: Float64Array) => {
+    let m = 0;
+    for (let i = 0; i < arr.length; i++) m += arr[i];
+    m /= arr.length || 1;
+    for (let i = 0; i < arr.length; i++) arr[i] -= m;
+  };
+  demean(sColCur);
+  demean(sColPrev);
+  demean(sRowCur);
+  demean(sRowPrev);
+  return {
+    dx: best1DShift(sColCur, sColPrev, Math.max(4, Math.round(w * 0.05))),
+    dy: best1DShift(sRowCur, sRowPrev, Math.max(4, Math.round(h * 0.05))),
+  };
+}
+
 // ---- Motion blob detection (frame differencing) ---------------------------
 // Returns ALL small, compact moving regions (not just one) so the RANSAC stage
 // downstream has the full candidate set to choose the real ball from. The ball
@@ -46,13 +135,22 @@ let sMask = new Uint8Array(0);
 let sSeen = new Uint8Array(0);
 let sStack = new Int32Array(0);
 
-export function findMovingBlobs(
+export interface FrameAnalysis {
+  blobs: RawBlob[];
+  motion: number; // moving-pixel fraction after shift compensation (0 if frame unusable)
+  shift: FrameShift; // estimated global camera motion this frame (px)
+}
+
+// Full per-frame analysis: estimate global camera motion, difference the frame
+// against the SHIFTED previous frame (so handheld wobble doesn't light up the
+// whole scene and drown the ball), then segment ball-candidate blobs.
+export function analyzeFrame(
   cur: Uint8ClampedArray,
   prev: Uint8ClampedArray,
   w: number,
   h: number,
   cap = 24,
-): RawBlob[] {
+): FrameAnalysis {
   const n = w * h;
   if (n !== scratchN) {
     scratchN = n;
@@ -64,20 +162,47 @@ export function findMovingBlobs(
     sMask.fill(0);
     sSeen.fill(0);
   }
+  const shift = estimateShift(cur, prev, w, h);
+  const sx = Math.round(shift.dx);
+  const sy = Math.round(shift.dy);
+
   const diff = sDiff;
   let dSum = 0;
-  for (let p = 0, i = 0; p < n; p++, i += 4) {
-    const d =
-      Math.abs(cur[i] - prev[i]) +
-      Math.abs(cur[i + 1] - prev[i + 1]) +
-      Math.abs(cur[i + 2] - prev[i + 2]);
-    diff[p] = d;
-    dSum += d;
+  if (sx === 0 && sy === 0) {
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+      const d =
+        Math.abs(cur[i] - prev[i]) +
+        Math.abs(cur[i + 1] - prev[i + 1]) +
+        Math.abs(cur[i + 2] - prev[i + 2]);
+      diff[p] = d;
+      dSum += d;
+    }
+  } else {
+    // Compensated diff: compare each pixel with where the scene WAS.
+    diff.fill(0);
+    const xA = Math.max(0, sx);
+    const xB = Math.min(w, w + sx);
+    const yA = Math.max(0, sy);
+    const yB = Math.min(h, h + sy);
+    for (let y = yA; y < yB; y++) {
+      let p = y * w + xA;
+      let q = (y - sy) * w + (xA - sx);
+      for (let x = xA; x < xB; x++, p++, q++) {
+        const i = p * 4;
+        const j = q * 4;
+        const d =
+          Math.abs(cur[i] - prev[j]) +
+          Math.abs(cur[i + 1] - prev[j + 1]) +
+          Math.abs(cur[i + 2] - prev[j + 2]);
+        diff[p] = d;
+        dSum += d;
+      }
+    }
   }
   // Adaptive threshold on the frame's own noise floor: a quiet tripod scene
   // (mean diff ~1-4) drops to ~26 so a faint distant ball still registers,
-  // while wind/handheld shake raises it toward 64 instead of flooding the
-  // mask with noise blobs.
+  // while residual shake raises it toward 64 instead of flooding the mask
+  // with noise blobs.
   const thr = Math.min(64, Math.max(26, 12 + (dSum / n) * 5));
   const mask = sMask;
   let on = 0;
@@ -87,9 +212,10 @@ export function findMovingBlobs(
       on++;
     }
   }
-  // Global change (exposure/AGC shift, camera knock): the whole frame moved,
-  // nothing useful can be segmented — skip rather than emit garbage.
-  if (on > n * 0.1) return [];
+  // Global change even after compensation (exposure/AGC shift, rotation, a
+  // hard knock): nothing useful can be segmented — skip rather than emit
+  // garbage, and report zero motion so burst triggers don't fire on it.
+  if (on > n * 0.15) return { blobs: [], motion: 0, shift };
 
   const BALL_MIN = 2;
   const BALL_MAX = Math.max(150, (n / 128) | 0); // scales with detection resolution
@@ -147,7 +273,22 @@ export function findMovingBlobs(
     });
   }
   blobs.sort((a, b) => b.score - a.score);
-  return blobs.slice(0, cap).map(({ x, y, size }) => ({ x, y, size }));
+  return {
+    blobs: blobs.slice(0, cap).map(({ x, y, size }) => ({ x, y, size })),
+    motion: on / n,
+    shift,
+  };
+}
+
+// Back-compat convenience: blobs only (shift compensation still applied).
+export function findMovingBlobs(
+  cur: Uint8ClampedArray,
+  prev: Uint8ClampedArray,
+  w: number,
+  h: number,
+  cap = 24,
+): RawBlob[] {
+  return analyzeFrame(cur, prev, w, h, cap).blobs;
 }
 
 // ---- Quadratic (constant-acceleration) least squares ----------------------

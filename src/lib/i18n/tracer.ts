@@ -30,8 +30,8 @@ export const d: Record<string, string> = {
   "ミート率": "Smash factor",
   "推定初速 {ballSpeed} m/s ・ ヘッドスピード {hs} m/s（{club}）":
     "Est. ball speed {ballSpeed} m/s · Head speed {hs} m/s ({club})",
-  "※ 飛行中は線を描かず、打球の候補を一旦すべて記録 → 物理法則（放物線・重力）に合致する軌道だけを逆算抽出し、約1.5秒後にトレーサーを描画します。これにより風で揺れるネット・木々・人・影などのノイズを誤検知しません。打音（マイク）が使える場合はインパクトを基準に時間枠を絞り精度が上がります。飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（β）。":
-    "* During flight no line is drawn; every shot candidate is recorded first, then only trajectories matching physics (parabola, gravity) are back-solved and the tracer is drawn after about 1.5s. This avoids false detections from wind-swaying nets, trees, people, or shadows. When impact sound (mic) is available, the time window is narrowed around impact for higher accuracy. Distance, apex, ball speed, and smash factor are physics estimates from club and head speed (beta).",
+  "※ 飛行中は線を描かず、打球の候補を一旦すべて記録 → 物理法則（放物線・重力）に合致する軌道だけを逆算抽出し、約1.5秒後にトレーサーを描画します。これにより風で揺れるネット・木々・人・影などのノイズを誤検知しません。手ブレはフレーム全体の移動量を推定して自動補正するため、手持ち撮影でもボールを追跡できます。インパクトの判定は打音（マイク）に加えてスイング動作そのものも検知します。飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（β）。":
+    "* During flight no line is drawn; every shot candidate is recorded first, then only trajectories matching physics (parabola, gravity) are back-solved and the tracer is drawn after about 1.5s. This avoids false detections from wind-swaying nets, trees, people, or shadows. Camera shake is auto-compensated by estimating whole-frame motion, so the ball is tracked even handheld. Impact is detected from the strike sound (mic) and from the swing motion itself. Distance, apex, ball speed, and smash factor are physics estimates from club and head speed (beta).",
   "最高到達点 {apex}m": "Apex {apex}m",
   "🎬 3Dズーム・リプレイ": "🎬 3D Zoom Replay",
   "🔄 もう一度": "🔄 Again",

@@ -24,7 +24,7 @@ import { fetchBallShots, saveBallShot, fetchSwings } from "@/lib/db";
 import { useT } from "@/lib/i18n";
 import type { BallShot, BallShape, Swing } from "@/lib/types";
 import {
-  findMovingBlobs,
+  analyzeFrame,
   extractTrajectory,
   type Detection,
   type RawBlob,
@@ -98,6 +98,11 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const usingVfcRef = useRef(false);
   const capDtEmaRef = useRef(0); // smoothed ms between processed frames
   const lastCapMsRef = useRef(0);
+  // Cumulative global camera motion (normalized). Detections are stored in a
+  // STABILIZED frame (current screen minus this offset) so handheld wobble
+  // neither hides the ball nor bends its trajectory in the physics fit.
+  const cumShiftRef = useRef({ x: 0, y: 0 });
+  const motionBaseRef = useRef(0.003); // ambient moving-pixel fraction (EMA)
 
   // Impact-sound detection (layer 2): a sharp audio transient sets t0.
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -229,6 +234,8 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     cooldownUntilRef.current = 0;
     capDtEmaRef.current = 0;
     lastCapMsRef.current = 0;
+    cumShiftRef.current = { x: 0, y: 0 };
+    motionBaseRef.current = 0.003;
     setPhase("watching");
     setResult(null);
     setCamOn(true);
@@ -316,7 +323,14 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
 
   function captureStep(cur: Uint8ClampedArray, prev: Uint8ClampedArray, w: number, h: number, now: number) {
     const tSec = now / 1000;
-    const blobs = findMovingBlobs(cur, prev, w, h);
+    const { blobs: rawBlobs, motion, shift } = analyzeFrame(cur, prev, w, h);
+
+    // Stabilize: accumulate the camera's own motion and cancel it out of every
+    // detection, so the buffer holds scene-fixed coordinates even handheld.
+    const cum = cumShiftRef.current;
+    cum.x += shift.dx / w;
+    cum.y += shift.dy / h;
+    const blobs = rawBlobs.map((b) => ({ ...b, x: b.x - cum.x, y: b.y - cum.y }));
 
     // Buffer all candidates, then prune to the rolling window.
     for (const b of blobs) bufferRef.current.push({ ...b, t: tSec });
@@ -326,8 +340,10 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     }
 
     if (t0Ref.current == null) {
-      // Layer 2: impact sound. Layer (fallback): visual launch.
-      if (!detectImpactSound(now)) tryVisualLaunch(blobs, now);
+      // Impact triggers, most precise first: ① strike sound ② the SWING
+      // itself — ball flight always starts right after the golfer's motion
+      // burst, so that burst is the primary visual cue — ③ ball-launch jump.
+      if (!detectImpactSound(now) && !tryMotionBurst(motion, now)) tryVisualLaunch(blobs, now);
       // Layer 3: continuous scan. Even when NO trigger fired (mic denied,
       // faint impact, launch missed), periodically look back over the buffer
       // for a completed physically-valid flight — a shot must never be lost
@@ -373,6 +389,20 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     soundBaseRef.current = base * 0.95 + rms * 0.05; // slow ambient baseline
     if (rms > Math.max(0.07, base * 4) && now - lastImpactRef.current > 1200) {
       lastImpactRef.current = now;
+      arm(now);
+      return true;
+    }
+    return false;
+  }
+
+  // The golfer's swing: a sharp full-body/club motion burst well above the
+  // ambient level. Since impact sits inside the burst, arming here anchors the
+  // analysis window on the true start of flight even when the mic is off and
+  // the ball itself is too small to see launch. Returns true if it armed.
+  function tryMotionBurst(motion: number, now: number): boolean {
+    const base = motionBaseRef.current;
+    motionBaseRef.current = Math.min(0.2, base * 0.97 + motion * 0.03);
+    if (motion > Math.max(0.02, base * 4)) {
       arm(now);
       return true;
     }
@@ -455,6 +485,12 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     const rv = revealRef.current!;
     const pts = rv.traj.pts;
     if (pts.length < 2) return;
+    // Trajectory points live in the stabilized frame; add back the current
+    // cumulative camera offset so the trace stays glued to the scene.
+    const ox = cumShiftRef.current.x;
+    const oy = cumShiftRef.current.y;
+    const sx = (pt: Pt) => (pt.x + ox) * w;
+    const sy = (pt: Pt) => (pt.y + oy) * h;
     const raw = Math.max(0, Math.min(1, (now - rv.start) / REVEAL_MS));
     const p = raw * raw * (3 - 2 * raw); // smoothstep
     const col = shapeColor(rv.shape);
@@ -469,13 +505,13 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.beginPath();
-    ctx.moveTo(pts[0].x * w, pts[0].y * h);
-    for (let i = 1; i <= upto; i++) ctx.lineTo(pts[i].x * w, pts[i].y * h);
+    ctx.moveTo(sx(pts[0]), sy(pts[0]));
+    for (let i = 1; i <= upto; i++) ctx.lineTo(sx(pts[i]), sy(pts[i]));
     // partial segment to the moving head
     if (upto < pts.length - 1) {
       const f = head - upto;
-      const hx = (pts[upto].x + (pts[upto + 1].x - pts[upto].x) * f) * w;
-      const hy = (pts[upto].y + (pts[upto + 1].y - pts[upto].y) * f) * h;
+      const hx = sx(pts[upto]) + (sx(pts[upto + 1]) - sx(pts[upto])) * f;
+      const hy = sy(pts[upto]) + (sy(pts[upto + 1]) - sy(pts[upto])) * f;
       ctx.lineTo(hx, hy);
       ctx.stroke();
       // leading comet dot
@@ -493,7 +529,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       ctx.shadowBlur = 0;
       ctx.fillStyle = "#fff";
       ctx.beginPath();
-      ctx.arc(ap.x * w, ap.y * h, Math.max(4, w / 150), 0, Math.PI * 2);
+      ctx.arc(sx(ap), sy(ap), Math.max(4, w / 150), 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.restore();
@@ -602,7 +638,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       )}
 
       <p className="text-[11px] leading-relaxed px-1" style={{ color: "var(--muted)" }}>
-        {t("※ 飛行中は線を描かず、打球の候補を一旦すべて記録 → 物理法則（放物線・重力）に合致する軌道だけを逆算抽出し、約1.5秒後にトレーサーを描画します。これにより風で揺れるネット・木々・人・影などのノイズを誤検知しません。打音（マイク）が使える場合はインパクトを基準に時間枠を絞り精度が上がります。飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（β）。")}
+        {t("※ 飛行中は線を描かず、打球の候補を一旦すべて記録 → 物理法則（放物線・重力）に合致する軌道だけを逆算抽出し、約1.5秒後にトレーサーを描画します。これにより風で揺れるネット・木々・人・影などのノイズを誤検知しません。手ブレはフレーム全体の移動量を推定して自動補正するため、手持ち撮影でもボールを追跡できます。インパクトの判定は打音（マイク）に加えてスイング動作そのものも検知します。飛距離・最高到達点・初速・ミート率は、クラブとヘッドスピードからの物理推定値です（β）。")}
       </p>
     </div>
   );
