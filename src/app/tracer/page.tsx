@@ -92,7 +92,8 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const t0Ref = useRef<number | null>(null); // armed impact time (s), null = watching
   const analyzeAtRef = useRef(0); // perf-ms at which to run backward verification
   const revealRef = useRef<{ traj: Trajectory; shape: BallShape; start: number } | null>(null);
-  const lastScanRef = useRef(0); // perf-ms of the last continuous scan
+  const lastScanRef = useRef(0); // perf-ms of the last fallback scan
+  const lastActiveMsRef = useRef(0); // perf-ms of the last above-ambient motion
   const cooldownUntilRef = useRef(0); // perf-ms until which detection is muted
   const vfcRef = useRef(0); // requestVideoFrameCallback handle
   const usingVfcRef = useRef(false);
@@ -139,7 +140,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   const ANALYZE_DELAY_MS = 1700; // "verify the past from the future" delay (~1.7s)
   const REVEAL_MS = 750; // dramatic line-grow animation
   const LAUNCH = 0.035; // visual-launch displacement / frame (fallback trigger)
-  const SCAN_EVERY_MS = 900; // continuous-scan cadence when no trigger fired
+  const SCAN_EVERY_MS = 700; // min gap between fallback scans
   const SCAN_WINDOW_S = 2.6; // how far back a continuous scan looks
   const QUIET_S = 0.35; // flight must have ENDED this long ago (> extractor maxGap)
   const COOLDOWN_MS = 5000; // suppress re-detection of the shot just revealed
@@ -232,6 +233,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     revealRef.current = null;
     lastImpactRef.current = 0;
     lastScanRef.current = 0;
+    lastActiveMsRef.current = 0;
     cooldownUntilRef.current = 0;
     capDtEmaRef.current = 0;
     lastCapMsRef.current = 0;
@@ -391,12 +393,20 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       // itself — ball flight always starts right after the golfer's motion
       // burst, so that burst is the primary visual cue — ③ ball-launch jump.
       if (!detectImpactSound(now) && !tryMotionBurst(motion, now)) tryVisualLaunch(blobs, now);
-      // Layer 3: continuous scan. Even when NO trigger fired (mic denied,
-      // faint impact, launch missed), periodically look back over the buffer
-      // for a completed physically-valid flight — a shot must never be lost
-      // just because its trigger was.
+
+      // Layer 4 (fallback): scan the buffer for a completed flight even though
+      // no trigger fired (mic denied, faint impact, launch missed) — a shot
+      // must never be lost just because its trigger was. Extraction costs tens
+      // of ms, so run it ONLY in the window where it can succeed: shortly
+      // after scene motion has died down. A still scene never pays the cost,
+      // and the hitch lands after the shot rather than during it.
+      if (motion > Math.max(0.006, motionBaseRef.current * 2)) lastActiveMsRef.current = now;
+      const sinceActive = now - lastActiveMsRef.current;
       if (
         t0Ref.current == null &&
+        lastActiveMsRef.current > 0 &&
+        sinceActive >= QUIET_S * 1000 &&
+        sinceActive <= SCAN_WINDOW_S * 1000 &&
         now >= cooldownUntilRef.current &&
         now - lastScanRef.current >= SCAN_EVERY_MS
       ) {
@@ -410,13 +420,17 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   }
 
   // Trigger-less detection: scan the rolling buffer for a flight that is
-  // already OVER (quiet for QUIET_S) so the delayed-reveal rule still holds.
+  // already OVER. The window ENDS QUIET_S ago, so anything recovered here
+  // satisfies the delayed-reveal rule by construction (and the extractor sees
+  // fewer detections, making the scan cheaper).
   function scanRecent(now: number) {
     const tSec = now / 1000;
-    const dets = bufferRef.current.filter((d) => d.t >= tSec - SCAN_WINDOW_S);
+    const lo = tSec - SCAN_WINDOW_S;
+    const hi = tSec - QUIET_S;
+    const dets = bufferRef.current.filter((d) => d.t >= lo && d.t <= hi);
     if (dets.length < 6) return;
     const traj = extractTrajectory(dets);
-    if (!traj || tSec - traj.tEnd < QUIET_S) return;
+    if (!traj) return;
     reveal(traj, now);
   }
 

@@ -374,17 +374,51 @@ export function extractTrajectory(
   const times = [...byTime.keys()].sort((a, b) => a - b);
   if (times.length < 3) return null;
 
+  // Per-frame spatial hash (cell = thresh) so a model only tests detections
+  // that could actually be inliers. inliersFor runs ~600×(RANSAC) + 6× per
+  // refine pass; scanning every blob at every frame time made a busy 60fps
+  // scene cost >100ms per call, which stalled the live capture loop. Cells are
+  // exact: any point within thresh of (px,py) falls in the 3×3 neighbourhood.
+  const KEY = 4096;
+  const cellKey = (gx: number, gy: number) => (gy + 512) * KEY + (gx + 512);
+  const grids: Map<number, Detection[]>[] = times.map((t) => {
+    const g = new Map<number, Detection[]>();
+    for (const d of byTime.get(t)!) {
+      const k = cellKey(Math.floor(d.x / thresh), Math.floor(d.y / thresh));
+      const c = g.get(k);
+      if (c) c.push(d);
+      else g.set(k, [d]);
+    }
+    return g;
+  });
+  const thresh2 = thresh * thresh;
+
   // Count inliers for a candidate model (one best detection per frame time).
   const inliersFor = (cx: Quad, cy: Quad) => {
     const chosen: Detection[] = [];
-    for (const t of times) {
+    for (let ti = 0; ti < times.length; ti++) {
+      const t = times[ti];
       const px = evalQuad(cx, t);
       const py = evalQuad(cy, t);
+      // A wildly extrapolating model can't match anything in frame — skip it
+      // before hashing (also keeps cell indices inside the key range).
+      if (!(px > -8 && px < 8 && py > -8 && py < 8)) continue;
+      const grid = grids[ti];
+      const gx = Math.floor(px / thresh);
+      const gy = Math.floor(py / thresh);
       let best: Detection | null = null;
-      let bd = thresh;
-      for (const d of byTime.get(t)!) {
-        const dist = Math.hypot(d.x - px, d.y - py);
-        if (dist < bd) { bd = dist; best = d; }
+      let bd = thresh2;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const cell = grid.get(cellKey(gx + dx, gy + dy));
+          if (!cell) continue;
+          for (const d of cell) {
+            const ex = d.x - px;
+            const ey = d.y - py;
+            const dist2 = ex * ex + ey * ey;
+            if (dist2 < bd) { bd = dist2; best = d; }
+          }
+        }
       }
       if (best) chosen.push(best);
     }
