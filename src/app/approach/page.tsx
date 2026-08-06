@@ -139,8 +139,10 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
   const lastShotMsRef = useRef(0);
   // Chronic-motion heatmap (HEAT_G × HEAT_G cells): suppresses persistent
   // movers (waving flag, shimmering grass) so only a NEW mover — the arriving
-  // ball — is tracked.
+  // ball — is tracked. Updated in wall-clock terms so behaviour is identical
+  // at 30fps and 60fps.
   const heatRef = useRef<Float32Array | null>(null);
+  const lastHeatMsRef = useRef(0);
 
   const [camOn, setCamOn] = useState(false);
   const [phase, setPhase] = useState<"target" | "measuring">("target");
@@ -152,6 +154,11 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
   const [shape, setShape] = useState<ShapeKey>("round");
   const [shots, setShots] = useState<Shot[]>([]);
   const [flash, setFlash] = useState(false);
+  const [lastDist, setLastDist] = useState<number | null>(null); // pin distance of last shot
+  // Live tracked-ball dot (throttled to ~8Hz so rendering stays cheap).
+  const [liveDot, setLiveDot] = useState<V2 | null>(null);
+  const liveDotMsRef = useRef(0);
+  const liveDotOnRef = useRef(false);
   const [lie, setLie] = useState<LieType>("flat");
   const [distance, setDistance] = useState("20");
 
@@ -260,14 +267,18 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
           const heat =
             heatRef.current ?? (heatRef.current = new Float32Array(HEAT_G * HEAT_G));
           const blobs = findMovingBlobs(cur.data, prev, c.width, c.height);
-          // Update chronic-motion heat, then keep only "fresh" movers.
-          for (let i = 0; i < heat.length; i++) heat[i] *= 0.95;
+          // Update chronic-motion heat in wall-clock terms (30fps-equivalent
+          // units), then keep only "fresh" movers.
+          const dtS = Math.min(0.1, lastHeatMsRef.current ? (now - lastHeatMsRef.current) / 1000 : 1 / 30);
+          lastHeatMsRef.current = now;
+          const decay = Math.pow(0.215, dtS); // ≈0.95/frame at 30fps
+          for (let i = 0; i < heat.length; i++) heat[i] *= decay;
           const cellOf = (b: { x: number; y: number }) =>
             Math.min(HEAT_G - 1, (b.y * HEAT_G) | 0) * HEAT_G +
             Math.min(HEAT_G - 1, (b.x * HEAT_G) | 0);
           const fresh = blobs.filter((b) => {
             const cell = cellOf(b);
-            heat[cell] += 1;
+            heat[cell] += dtS * 30;
             return heat[cell] < HEAT_ON;
           });
 
@@ -290,6 +301,11 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
             lastCentroidRef.current = { x: chosen.x, y: chosen.y };
             lastMotionMsRef.current = now;
             activeRef.current = true;
+            if (now - liveDotMsRef.current > 120) {
+              liveDotMsRef.current = now;
+              liveDotOnRef.current = true;
+              setLiveDot({ x: chosen.x, y: chosen.y });
+            }
           } else if (
             activeRef.current &&
             now - lastMotionMsRef.current > SETTLE_MS &&
@@ -299,6 +315,10 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
             // the track actually behaved like a shot: it travelled across the
             // frame and lived a while (a jittering flag/warm-up blip doesn't).
             activeRef.current = false;
+            if (liveDotOnRef.current) {
+              liveDotOnRef.current = false;
+              setLiveDot(null);
+            }
             const cpt = lastCentroidRef.current;
             const st = trackStartRef.current;
             const moved = cpt && st ? Math.hypot(cpt.x - st.x, cpt.y - st.y) : 0;
@@ -309,7 +329,7 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
             }
           }
         }
-        prevRef.current = cur.data.slice(0) as unknown as Uint8ClampedArray;
+        prevRef.current = cur.data; // fresh buffer per getImageData — no copy needed
       }
     }
     rafRef.current = requestAnimationFrame(detectLoop);
@@ -325,9 +345,10 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
     // Store dx = right(+), dy = away/long(+). b is toward camera, so dy = -b.
     const shot: Shot = { dx: round1(a), dy: round1(-b), zone };
     setShots((s) => [...s, shot]);
+    setLastDist(round1(Math.hypot(a, b)));
     if (navigator.vibrate) navigator.vibrate(shot.zone === "out" ? 30 : 15);
     setFlash(true);
-    setTimeout(() => setFlash(false), 700);
+    setTimeout(() => setFlash(false), 1400);
   }
 
   function onSvgTap(e: React.MouseEvent<SVGSVGElement>) {
@@ -381,6 +402,8 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
   }
   function stopMeasuring() {
     measuringRef.current = false;
+    liveDotOnRef.current = false;
+    setLiveDot(null);
     setPhase("target");
   }
 
@@ -451,6 +474,13 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
               const p = markerPos(s);
               return <circle key={i} cx={p.x} cy={p.y} r="1.8" fill={ZONE_COLOR[s.zone]} stroke="#0a2417" strokeWidth="0.5" />;
             })}
+            {/* Live tracked-ball indicator while it flies/rolls */}
+            {liveDot && phase === "measuring" && (
+              <g>
+                <circle cx={liveDot.x * 100} cy={liveDot.y * 100} r="2.6" fill="none" stroke="#22d3ee" strokeWidth="0.5" opacity="0.9" />
+                <circle cx={liveDot.x * 100} cy={liveDot.y * 100} r="0.9" fill="#22d3ee" />
+              </g>
+            )}
           </svg>
 
           {!camOn && (
@@ -468,7 +498,9 @@ function Recorder({ onSaved }: { onSaved: () => void }) {
             <div className="absolute top-2 left-2 px-3 py-1 rounded-full text-xs font-bold"
               style={{ background: phase === "measuring" ? "var(--red)" : "rgba(0,0,0,0.6)", color: "#fff" }}>
               {phase === "measuring"
-                ? flash ? t("● 着弾を記録！") : t("● 計測中… 着弾を自動検知")
+                ? flash
+                  ? `${t("● 着弾を記録！")}${lastDist != null ? ` ${t("ピンから{d}m", { d: lastDist })}` : ""}`
+                  : t("● 計測中… 着弾を自動検知")
                 : calibStep === "pin"
                   ? t("① ピン（カップ）をタップ")
                   : calibStep === "near"

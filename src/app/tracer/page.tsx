@@ -103,6 +103,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
   // neither hides the ball nor bends its trajectory in the physics fit.
   const cumShiftRef = useRef({ x: 0, y: 0 });
   const motionBaseRef = useRef(0.003); // ambient moving-pixel fraction (EMA)
+  const hudRef = useRef({ motion: 0 }); // live swing-sensor level for the canvas HUD
 
   // Impact-sound detection (layer 2): a sharp audio transient sets t0.
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -274,9 +275,9 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     const video = videoRef.current;
     const dc = diffRef.current;
     if (!video || !dc || video.readyState < 2 || !video.videoWidth) return;
-    // Watch the achieved processing rate: if we can't sustain ~22fps the
-    // device is compute-bound — permanently drop to the cheaper resolution
-    // (fewer, bigger pixels beat dropped frames for trajectory recovery).
+    // Watch the achieved processing rate: below ~18fps the device is
+    // compute-bound (even low-light cameras deliver 24fps) — permanently drop
+    // to the cheaper resolution; full frame rate beats extra pixels here.
     if (lastCapMsRef.current) {
       const dt = now - lastCapMsRef.current;
       // Ignore pauses (tab hidden, camera restart) — they are not "slow".
@@ -285,7 +286,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
           ? capDtEmaRef.current * 0.9 + dt * 0.1
           : dt;
       }
-      if (capDtEmaRef.current > 45 && dc.width > 320) {
+      if (capDtEmaRef.current > 55 && dc.width > 320) {
         dc.width = 320;
         dc.height = 240;
         prevRef.current = null;
@@ -298,7 +299,8 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     const cur = dctx.getImageData(0, 0, dc.width, dc.height);
     const prev = prevRef.current;
     if (prev) captureStep(cur.data, prev, dc.width, dc.height, now);
-    prevRef.current = cur.data.slice(0);
+    // getImageData returns a fresh buffer each call — safe to keep directly.
+    prevRef.current = cur.data;
   }
 
   function loop(now: number) {
@@ -316,9 +318,53 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
         // validated trajectory is ever drawn, as a delayed dramatic reveal.
         octx.clearRect(0, 0, canvas.width, canvas.height);
         if (revealRef.current) drawReveal(octx, canvas.width, canvas.height, now);
+        drawHud(octx, canvas.width, canvas.height, now);
       }
     }
     rafRef.current = requestAnimationFrame(loop);
+  }
+
+  // Canvas HUD (no React re-renders): a swing-sensor meter while watching and
+  // a verification progress line while the armed window counts down.
+  function drawHud(ctx: CanvasRenderingContext2D, w: number, h: number, now: number) {
+    if (t0Ref.current != null) {
+      // Armed: thin progress line along the top edge → "verifying the past".
+      const p = Math.max(0, Math.min(1, 1 - (analyzeAtRef.current - now) / ANALYZE_DELAY_MS));
+      ctx.save();
+      ctx.fillStyle = "rgba(251,191,36,0.25)";
+      ctx.fillRect(0, 0, w, Math.max(3, h / 160));
+      ctx.fillStyle = "#fbbf24";
+      ctx.fillRect(0, 0, w * p, Math.max(3, h / 160));
+      ctx.restore();
+      return;
+    }
+    // Watching: swing-sensor bar (motion level vs the burst trigger threshold).
+    const motion = hudRef.current.motion;
+    const threshold = Math.max(0.02, motionBaseRef.current * 4);
+    const frac = Math.max(0, Math.min(1, motion / threshold));
+    const bw = w * 0.26;
+    const bh = Math.max(5, h / 90);
+    const bx = w - bw - Math.max(8, w / 50);
+    const by = h - bh - Math.max(10, h / 44);
+    ctx.save();
+    // roundRect is missing on older WebKit — fall back to plain rects there.
+    const bar = (x: number, y: number, bw2: number, bh2: number) => {
+      ctx.beginPath();
+      if (typeof ctx.roundRect === "function") ctx.roundRect(x, y, bw2, bh2, bh2 / 2);
+      else ctx.rect(x, y, bw2, bh2);
+      ctx.fill();
+    };
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    bar(bx, by, bw, bh);
+    if (frac > 0.01) {
+      ctx.fillStyle = frac >= 1 ? "#f87171" : frac > 0.6 ? "#fbbf24" : "#4ade80";
+      bar(bx, by, Math.max(bh, bw * frac), bh);
+    }
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.font = `${Math.max(8, Math.round(h / 46))}px system-ui, sans-serif`;
+    ctx.textAlign = "right";
+    ctx.fillText("SWING SENSOR", bx + bw, by - Math.max(3, h / 120));
+    ctx.restore();
   }
 
   function captureStep(cur: Uint8ClampedArray, prev: Uint8ClampedArray, w: number, h: number, now: number) {
@@ -331,6 +377,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     cum.x += shift.dx / w;
     cum.y += shift.dy / h;
     const blobs = rawBlobs.map((b) => ({ ...b, x: b.x - cum.x, y: b.y - cum.y }));
+    hudRef.current.motion = motion;
 
     // Buffer all candidates, then prune to the rolling window.
     for (const b of blobs) bufferRef.current.push({ ...b, t: tSec });
@@ -496,33 +543,59 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
     const col = shapeColor(rv.shape);
     const head = p * (pts.length - 1);
     const upto = Math.floor(head);
+    const done = upto >= pts.length - 1;
+
+    // Head position (exact, for the comet and the partial segment).
+    let hx = sx(pts[pts.length - 1]);
+    let hy = sy(pts[pts.length - 1]);
+    if (!done) {
+      const f = head - upto;
+      hx = sx(pts[upto]) + (sx(pts[upto + 1]) - sx(pts[upto])) * f;
+      hy = sy(pts[upto]) + (sy(pts[upto + 1]) - sy(pts[upto])) * f;
+    }
+    const tracePath = () => {
+      ctx.beginPath();
+      ctx.moveTo(sx(pts[0]), sy(pts[0]));
+      for (let i = 1; i <= upto; i++) ctx.lineTo(sx(pts[i]), sy(pts[i]));
+      if (!done) ctx.lineTo(hx, hy);
+    };
 
     ctx.save();
-    ctx.shadowBlur = Math.max(8, w / 80);
-    ctx.shadowColor = col;
-    ctx.strokeStyle = col;
-    ctx.lineWidth = Math.max(3, w / 170);
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
+    // Wide soft glow underlay, then the bright core line.
+    ctx.strokeStyle = col;
+    ctx.shadowColor = col;
+    ctx.globalAlpha = 0.3;
+    ctx.shadowBlur = Math.max(14, w / 45);
+    ctx.lineWidth = Math.max(8, w / 60);
+    tracePath();
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = Math.max(8, w / 80);
+    ctx.lineWidth = Math.max(3, w / 170);
+    tracePath();
+    ctx.stroke();
+
+    // Launch point marker.
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = "#fff";
     ctx.beginPath();
-    ctx.moveTo(sx(pts[0]), sy(pts[0]));
-    for (let i = 1; i <= upto; i++) ctx.lineTo(sx(pts[i]), sy(pts[i]));
-    // partial segment to the moving head
-    if (upto < pts.length - 1) {
-      const f = head - upto;
-      const hx = sx(pts[upto]) + (sx(pts[upto + 1]) - sx(pts[upto])) * f;
-      const hy = sy(pts[upto]) + (sy(pts[upto + 1]) - sy(pts[upto])) * f;
-      ctx.lineTo(hx, hy);
-      ctx.stroke();
-      // leading comet dot
+    ctx.arc(sx(pts[0]), sy(pts[0]), Math.max(2.5, w / 220), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    if (!done) {
+      // Leading comet dot while the line grows.
+      ctx.shadowColor = col;
       ctx.shadowBlur = Math.max(10, w / 60);
       ctx.fillStyle = "#fff";
       ctx.beginPath();
       ctx.arc(hx, hy, Math.max(3, w / 150), 0, Math.PI * 2);
       ctx.fill();
     } else {
-      ctx.stroke();
-      // apex marker once fully revealed
+      // Apex marker.
       let apexI = 0;
       pts.forEach((pt, i) => { if (pt.y < pts[apexI].y) apexI = i; });
       const ap = pts[apexI];
@@ -531,6 +604,21 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
       ctx.beginPath();
       ctx.arc(sx(ap), sy(ap), Math.max(4, w / 150), 0, Math.PI * 2);
       ctx.fill();
+      // Landing ripple: two expanding rings, looping.
+      const age = now - rv.start - REVEAL_MS;
+      const lx = sx(pts[pts.length - 1]);
+      const ly = sy(pts[pts.length - 1]);
+      const PERIOD = 1200;
+      for (let k = 0; k < 2; k++) {
+        const tt = ((age + (k * PERIOD) / 2) % PERIOD) / PERIOD;
+        ctx.globalAlpha = (1 - tt) * 0.55;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = Math.max(1.5, w / 400);
+        ctx.beginPath();
+        ctx.arc(lx, ly, Math.max(4, w / 120) + tt * Math.max(16, w / 34), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
     }
     ctx.restore();
   }
@@ -581,7 +669,7 @@ function Tracer({ onSaved }: { onSaved: () => void }) {
           {missed && !result && (
             <div className="absolute bottom-2 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full text-xs font-bold text-center"
               style={{ background: "rgba(0,0,0,0.65)", color: "#fbbf24" }}>
-              {t("⚠ 弾道を検出できず。ボールが大きく映る位置から撮ってみてください")}
+              {t("⚠ 有効な弾道を確認できませんでした（素振り・ノイズは記録しません）")}
             </div>
           )}
         </div>

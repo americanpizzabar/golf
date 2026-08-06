@@ -22,6 +22,7 @@ export const d: Record<string, string> = {
 
   // Measuring / calibration status
   "● 着弾を記録！": "● Landing recorded!",
+  "ピンから{d}m": "{d}m from pin",
   "● 計測中… 着弾を自動検知": "● Measuring… auto-detecting landings",
   "① ピン（カップ）をタップ": "① Tap the pin (cup)",
   "② ピンから「手前1m」をタップ": "② Tap 1m toward you from the pin",
